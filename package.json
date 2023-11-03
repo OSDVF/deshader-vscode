@@ -1,0 +1,262 @@
+{
+  "name": "deshader-vscode",
+  "displayName": "Deshader",
+  "description": "Debug GLSL shaders. Write GLSL code with smart features.",
+  "publisher": "osdvf",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "keywords": [
+    "glsl"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OSDVF/deshader-vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/OSDVF/deshader-vscode/issues"
+  },
+  "preview": true,
+  "activationEvents": [
+    "onDebug",
+    "onFileSystem:deshader",
+    "onSearch:deshader",
+    "onCommand:deshader.getProgramName"
+  ],
+  "browser": "./dist/web/extension.js",
+  "extensionKind": ["ui"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Debugger can be attached to a program running on remote machine if it has Deshader injected. On local machines the extension can inject Deshader to any program."
+    }
+  },
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "glsl"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "deshader",
+        "label": "Deshader",
+        "runtime": "node",
+        "program": "./dist/web/debugAdapter.ts",
+        "languages": [
+          "glsl"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "description": "Ineject Deshader into a program and launch it",
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the executable",
+                "default": "${workspaceFolder}/${command:AskForProgramName}"
+              },
+              "args": {
+                "type": "array",
+                "description": "Command line arguments passed to the program",
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Absolute path to the working directory of the program or empty to use the current workspace",
+                "default": ""
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables passed to the program",
+                "default": {}
+              },
+              "console": {
+                "type": "string",
+                "enum": ["debugConsole", "integratedTerminal", "externalTerminal"],
+                "enumDescriptions": [
+                  "Use the built-in debug console",
+                  "Use the built-in integrated terminal",
+                  "Use the external terminal"
+                ],
+                "default": "integratedTerminal",
+                "description": "Console used for communication between user and the debugged program"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop after launch",
+                "default": false
+              },
+              "showDevDebugOutput": {
+                "type": "boolean",
+                "description": "Show debug output from the debug adapter",
+                "default": false
+              }
+            }
+          },
+          "attach": {
+            "description": "Attach to a running program with Deshader already injected",
+            "required": ["address", "port", "protocol"],
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "Address of Deshader debug listener",
+                "default": "127.0.0.1"
+              },
+              "port": {
+                "type": "number",
+                "description": "Port at which Deshader debug listener is listening",
+                "default": 8081
+              },
+              "protocol": {
+                "type": "string",
+                "enum": ["http", "https"],
+                "enumDescriptions": [
+                  "Use HTTP",
+                  "Use HTTPS"
+                ],
+                "default": "http",
+                "description": "Protocol used to connect to the debug adapter"
+              },
+              "console": {
+                "type": "string",
+                "enum": ["debugConsole", "integratedTerminal", "externalTerminal"],
+                "enumDescriptions": [
+                  "Use the built-in debug console",
+                  "Use the built-in integrated terminal",
+                  "Use the external terminal"
+                ],
+                "default": "integratedTerminal",
+                "description": "Console used for communication between user and the debugged program"
+              },
+              "showDevDebugOutput": {
+                "type": "boolean",
+                "description": "Show debug output from the debug adapter",
+                "default": false
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop after attach",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "name": "Deshader Launch",
+            "type": "deshader",
+            "request": "launch",
+            "program": "${workspaceFolder}/${command:AskForProgramName}",
+            "args": [],
+            "cwd": "",
+            "env": {},
+            "console": "integratedTerminal",
+            "stopOnEntry": false,
+            "showDevDebugOutput": false
+          },
+          {
+            "name": "Deshader Attach",
+            "type": "deshader",
+            "request": "attach",
+            "protocol": "http",
+            "address": "127.0.0.1",
+            "port": 8081,
+            "showDevDebugOutput": false,
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Deshader Launch",
+            "description": "Launch a program with Deshader injected",
+            "body": {
+              "type": "deshader",
+              "request": "launch",
+              "name": "Deshader Launch",
+              "program": "^\"\\${workspaceFolder}/\\${command:AskForProgramName}\"",
+              "args": [],
+              "cwd": "",
+              "env": {},
+              "console": "integratedTerminal",
+              "stopOnEntry": false,
+              "showDevDebugOutput": false
+            }
+          },
+          {
+            "label": "Deshader Attach",
+            "description": "Attach to a running program with Deshader injected",
+            "body": {
+              "type": "deshader",
+              "request": "attach",
+              "name": "Deshader Attach",
+              "protocol": "http",
+              "address": "127.0.0.1",
+              "port": 8081,
+              "showDevDebugOutput": false,
+              "stopOnEntry": false
+            }
+          }
+        ],
+        "variables": {
+          "AskForProgramName": "deshader.getProgramName"
+        }
+      }
+    ],
+    "languages": [
+      {
+        "id": "glsl",
+        "aliases": ["GLSL", "glsl"],
+        "extensions": [
+          ".glsl",
+          ".vert",
+          ".frag",
+          ".comp"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "deshader.helloWorld",
+        "title": "Hello World"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "vscode-test-web --extensionDevelopmentPath=. --extensionTestsPath=dist/web/test/suite/index.js",
+    "pretest": "npm run compile-web",
+    "vscode:prepublish": "npm run package-web",
+    "compile-web": "webpack",
+    "watch-web": "webpack --watch",
+    "package-web": "webpack --mode production --devtool hidden-source-map",
+    "lint": "eslint src --ext ts",
+    "run-in-browser": "vscode-test-web --browserType=chromium --extensionDevelopmentPath=. ."
+  },
+  "dependencies": {
+    "node-polyfill-webpack-plugin": "^2.0.1",
+    "vscode-debugadapter": "1.38.0-pre.4"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.83.0",
+    "@types/mocha": "^10.0.2",
+    "eslint": "^8.50.0",
+    "@typescript-eslint/eslint-plugin": "^6.7.3",
+    "@typescript-eslint/parser": "^6.7.3",
+    "mocha": "^10.2.0",
+    "typescript": "^5.2.2",
+    "@vscode/test-web": "^0.0.46",
+    "ts-loader": "^9.4.4",
+    "webpack": "^5.88.2",
+    "webpack-cli": "^5.1.4",
+    "@types/webpack-env": "^1.18.2",
+    "assert": "^2.1.0",
+    "process": "^0.11.10"
+  }
+}
