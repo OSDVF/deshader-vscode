@@ -1,5 +1,10 @@
-declare namespace NodeJS {
-    interface Process {
-      browser: boolean;
+export {}
+
+declare global {
+  var deshader: {
+    [protocol: string] : {
+      address: string,
+      port: number
     }
-  }
+  } | undefined;
+}

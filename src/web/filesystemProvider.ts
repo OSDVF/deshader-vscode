@@ -6,6 +6,7 @@
 
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { Communicator } from './deshader';
 
 export class File implements vscode.FileStat {
 
@@ -47,37 +48,115 @@ export class Directory implements vscode.FileStat {
 }
 
 export type Entry = File | Directory;
+type PromiseOr<T> = Promise<T> | T;
 
 export class DeshaderFilesystem implements vscode.FileSystemProvider {
-
 	root = new Directory('');
+	output: vscode.OutputChannel;
+	comm: Communicator;
+	liveWorkspace = JSON.stringify({
+		folders: [
+			{
+				path: 'sources',
+			},
+			{
+				path: 'programs'
+			},
+			{
+				path: 'workspace'
+			}
+		]
+	});
+
+	constructor(output: vscode.OutputChannel, comm: Communicator) {
+		output.appendLine(`Mounting filesystem with communicator ${comm.uri.toString()}`);
+		this.output = output;
+		this.comm = comm;
+	}
 
 	// --- manage file metadata
 
-	stat(uri: vscode.Uri): vscode.FileStat {
-		return this._lookup(uri, false);
+	async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
+		if (uri.path === '/live-app.code-workspace') {
+			return {
+				type: vscode.FileType.File,
+				permissions: vscode.FilePermission.Readonly,
+				ctime: Date.now(),
+				mtime: Date.now(),
+				size: this.liveWorkspace.length
+			};
+		}
+		let result;
+		switch(uri.path.substring(0, 8)) {
+			case '/sources':
+				result =  await this.comm.statSource(uri.path.slice(8));
+			break;
+			case '/program':
+				result =  await this.comm.statProgram(uri.path.slice(9));
+				break;
+			case '/workspa':
+				result =  await this.comm.stat(uri.path.slice(10));
+				break;
+		}
+		
+		this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`);
+		return result;
 	}
 
-	readDirectory(uri: vscode.Uri): [string, vscode.FileType][] {
+	static convertList(list: string[]) : [string, vscode.FileType][] {
+		const result: [string, vscode.FileType][] = [];
+
+		for(const f of list) {
+			if(f.endsWith('/')) {
+				result.push([f, vscode.FileType.Directory]);
+			} else if(f[0] == '>') {
+				result.push([f, vscode.FileType.SymbolicLink]);
+			} else {
+				result.push([f, vscode.FileType.File]);
+			}
+		}
+		return result;
+	}
+
+	async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
+		let list;
+		switch(uri.path.substring(0, 8)) {
+			case '/sources':
+				list = await this.comm.listSources(uri.path.slice(8));
+				return DeshaderFilesystem.convertList(list);
+			case '/program':
+				list = await this.comm.listPrograms(uri.path.slice(9));
+				return DeshaderFilesystem.convertList(list);
+			case '/workspa':
+				list = await this.comm.listWorkspace(uri.path.slice(10));
+				return DeshaderFilesystem.convertList(list);
+		}
 		const entry = this._lookupAsDirectory(uri, false);
 		const result: [string, vscode.FileType][] = [];
 		for (const [name, child] of entry.entries) {
 			result.push([name, child.type]);
 		}
+		this.output.appendLine(`Read dir ${uri.toString()} result: ${JSON.stringify(result)}`);
 		return result;
 	}
 
 	// --- manage file contents
 
-	readFile(uri: vscode.Uri): Uint8Array {
-		const data = this._lookupAsFile(uri, false).data;
+	async readFile(uri: vscode.Uri): Promise<Uint8Array> {
+		this.output.appendLine(`Reading ${uri.toString()}`);
+		if (uri.path === '/live-app.code-workspace') {
+			this.output.appendLine('Reading workspace file');
+			return new TextEncoder().encode(this.liveWorkspace);
+		}
+		const data = await this.comm.readFile(uri.path.slice(8));
 		if (data) {
-			return data;
+			return new TextEncoder().encode(data);
 		}
 		throw vscode.FileSystemError.FileNotFound();
 	}
 
 	writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): void {
+		this.output.appendLine(`Writing ${uri.toString()}`);
 		const basename = path.posix.basename(uri.path);
 		const parent = this._lookupParentDirectory(uri);
 		let entry = parent.entries.get(basename);
@@ -105,7 +184,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	// --- manage files/folders
 
 	rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean }): void {
-
+		this.output.appendLine(`Renaming ${oldUri.toString()} to ${newUri.toString()}`);
 		if (!options.overwrite && this._lookup(newUri, true)) {
 			throw vscode.FileSystemError.FileExists(newUri);
 		}
@@ -127,6 +206,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	delete(uri: vscode.Uri): void {
+		this.output.appendLine(`Deleting ${uri.toString()}`);
 		const dirname = uri.with({ path: path.posix.dirname(uri.path) });
 		const basename = path.posix.basename(uri.path);
 		const parent = this._lookupAsDirectory(dirname, false);
@@ -140,6 +220,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	createDirectory(uri: vscode.Uri): void {
+		this.output.appendLine(`Creating directory ${uri.toString()}`);
 		const basename = path.posix.basename(uri.path);
 		const dirname = uri.with({ path: path.posix.dirname(uri.path) });
 		const parent = this._lookupAsDirectory(dirname, false);

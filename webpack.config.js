@@ -32,7 +32,10 @@ const webExtensionConfig = {
 		extensions: ['.ts', '.js'], // support ts-files and js-files
 		alias: {
 			// provides alternate implementation for node module and source files
-			'./descriptorFactory': false
+			'./descriptorFactory': false,
+			process: "process/browser",
+			"conditional-debug-session": "./session-base",
+			"assert": false,
 		},
 		fallback: {
 			"fs": false,

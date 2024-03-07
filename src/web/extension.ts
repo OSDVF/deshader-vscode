@@ -4,16 +4,17 @@ import * as vscode from 'vscode';
 import { ProviderResult } from 'vscode';
 import { DebugSession } from './debugSession';
 import { DeshaderFilesystem } from './filesystemProvider';
+import { Communicator, Config } from './deshader';
 
 // compile-time selection of debug adapter run mode
-const runMode: 'external' | 'server' | 'inline' = 'inline';
+const runMode: 'server' | 'inline' = 'inline';
+
+// cleanup inconsitent line breaks
+const formatText = (text: string) => `\r${text.split(/(\r?\n)/g).join("\r")}\r`;
 
 export function activate(context: vscode.ExtensionContext) {
-	console.log('Congratulations, your extension "deshader-vscode" is now active in the web extension host!');
-
-	context.subscriptions.push(vscode.commands.registerCommand('deshader.helloWorld', () => {
-		return vscode.window.showInformationMessage('Hello World from Deshader integration for VSCode in a web extension host!');
-	}));
+	let nextTerminalId = 1;
+	console.log('Activated Deshader Extension');
 
 	context.subscriptions.push(vscode.commands.registerCommand('deshader.getProgramName', config => {
 		return vscode.window.showInputBox({
@@ -22,9 +23,135 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	}));
 
-	const fs = new DeshaderFilesystem();
-	context.subscriptions.push(vscode.workspace.registerFileSystemProvider('deshader', fs, { isCaseSensitive: true, isReadonly: false }));
+	const output = vscode.window.createOutputChannel('Deshader');
+	let comm: Communicator | null = null;
+	function connectToFS(uri?: string, config?: Config) {
+		try {
+			comm ??= typeof uri !== 'undefined' ? Communicator.fromUri(vscode.Uri.parse(uri), output) : Communicator.fromConfig(config!, output);
+			const fs = new DeshaderFilesystem(output, comm);
+			context.subscriptions.push(vscode.workspace.registerFileSystemProvider('deshader', fs, { isCaseSensitive: true, isReadonly: false }));
+		} catch (e) {
+			if ('message' in (e as Error))
+				output.appendLine((e as Error).message);
+			else
+				output.appendLine(JSON.stringify(e));
+		}
+	}
 
+	if (typeof deshader !== 'undefined') {// Automatically connect if running inside deshader-embedded vscode
+		console.log("Found embedded Deshader config ", deshader);
+		let protocol: Config['protocol'] = 'http';
+		if (typeof deshader.wss !== 'undefined') {
+			protocol = 'wss'
+		} else if (typeof deshader.https !== 'undefined') {
+			protocol = 'https'
+		} else if (typeof deshader.ws !== 'undefined') {
+			protocol = 'ws'
+		}
+		connectToFS(undefined, { protocol, ...deshader[protocol] });
+	}
+
+	const writeEmitter = new vscode.EventEmitter<string>();
+	function terminal(): vscode.ExtensionTerminalOptions {
+		const keys = {
+			enter: "\r",
+			backspace: "\x7f",
+			delete: "\x1b[3~",
+			right: "\x1b[C",
+		};
+		const actions = {
+			cursorBack: "\x1b[D",
+			deleteAll: "\x1b[0K",
+			deleteChar: "\x1b[P",
+			clear: "\x1b[2J\x1b[3J\x1b[;H",
+		};
+		function defaultLine() {
+			return `dsh${comm?.uri.toString() ?? ' (not connected)'}$ `;
+		}
+		let input = "";
+		let cursor = 0;
+		return {
+			name: `Deshader Terminal ${nextTerminalId++}`,
+			pty: {
+				onDidWrite: writeEmitter.event,
+				open() {
+					if (comm == null) {
+						writeEmitter.fire(formatText("Deshader not connected. Connect by launching a debug configuration or opening embedded Deshader Editor."));
+					}
+					else {
+						writeEmitter.fire(defaultLine());
+					}
+				},
+				close() { },
+				async handleInput(char) {
+					switch (char) {
+						case keys.enter:
+							if (comm != null) {
+								writeEmitter.fire(`\r${defaultLine()}${input}\r\n`);
+								// třrim off leading default prompt
+								try {
+									// run the command
+									const response = await comm.send(input);
+									writeEmitter.fire(`\r${formatText(response)}`);
+								} catch (error) {
+									writeEmitter.fire(`\r${formatText((error as Error).message)}\n`);
+								}
+							} else {
+								writeEmitter.fire(`\r${formatText("Not connected")}\n`);
+							}
+							writeEmitter.fire(defaultLine());
+							input = "";
+							cursor = 0;
+							break;
+						case keys.backspace:
+							if (input.length <= 0) {
+								return;
+							}
+							// remove last character TODO not last
+							input = input.slice(0, cursor - 1) + input.slice(cursor);
+							cursor--;
+							writeEmitter.fire(actions.cursorBack);
+							writeEmitter.fire(actions.deleteChar);
+							return;
+						case keys.right:
+							if (cursor >= input.length) {
+								return;
+							}
+							cursor++;
+							writeEmitter.fire(char);
+							return;
+						case actions.cursorBack:
+							if (cursor <= 0) {
+								return;
+							}
+							cursor--;
+							writeEmitter.fire(char);
+							return;
+						case keys.delete:
+							input =
+								input.slice(0, cursor) +
+								input.slice(cursor + 1);
+							writeEmitter.fire(actions.deleteChar);
+							break;
+						default:
+							// typing a new character
+							input += char;
+							cursor++;
+							writeEmitter.fire(char);
+					}
+				},
+			},
+		}
+	}
+	context.subscriptions.push(vscode.window.registerTerminalProfileProvider('deshader.terminal', {
+		provideTerminalProfile(token: vscode.CancellationToken): vscode.ProviderResult<vscode.ExtensionTerminalOptions> {
+			return terminal();
+		}
+	} as vscode.TerminalProfileProvider));
+
+	context.subscriptions.push(vscode.commands.registerCommand('deshader.newTerminal', () => {
+		vscode.window.createTerminal(terminal()).show();
+	}));
 
 	// debug adapters can be run in different ways by using a vscode.DebugAdapterDescriptorFactory:
 	let factory: vscode.DebugAdapterDescriptorFactory;
@@ -36,12 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		case 'inline':
 			// run the debug adapter inside the extension and directly talk to it
-			factory = new InlineDebugAdapterFactory();
-			break;
-
-		case 'external': default:
-			// run the debug adapter as a separate process
-			factory = new DebugAdapterExecutableFactory();
+			factory = new InlineDebugAdapterFactory(comm);
 			break;
 	}
 
@@ -54,28 +176,14 @@ export function activate(context: vscode.ExtensionContext) {
 // This method is called when your extension is deactivated
 export function deactivate() { }
 
-class DebugAdapterExecutableFactory implements vscode.DebugAdapterDescriptorFactory {
-
-	// The following use of a DebugAdapter factory shows how to control what debug adapter executable is used.
-	// Since the code implements the default behavior, it is absolutely not neccessary and we show it here only for educational purpose.
-
-	createDebugAdapterDescriptor(_session: vscode.DebugSession, executable: vscode.DebugAdapterExecutable | undefined): ProviderResult<vscode.DebugAdapterDescriptor> {
-		// param "executable" contains the executable optionally specified in the package.json (if any)
-
-		// use the executable specified in the package.json if it exists or determine it based on some other information (e.g. the session)
-		if (!executable) {
-			console.error('No debug adapter executable specified in package.json');
-		}
-
-		// make VS Code launch the DA executable
-		return executable;
-	}
-}
-
 class InlineDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
+	comm: Communicator | null;
+	constructor(comm: Communicator | null) {
+		this.comm = comm;
+	 }
 
 	createDebugAdapterDescriptor(_session: vscode.DebugSession): ProviderResult<vscode.DebugAdapterDescriptor> {
 		// since DebugAdapterInlineImplementation is proposed API, a cast to <any> is required for now
-		return <any>new vscode.DebugAdapterInlineImplementation(new DebugSession());
+		return <any>new vscode.DebugAdapterInlineImplementation(new DebugSession(this.comm) as vscode.DebugAdapter);
 	}
 }
