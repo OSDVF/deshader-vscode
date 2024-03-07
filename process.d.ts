@@ -3,6 +3,6 @@ declare namespace NodeJS {
         /**
          * @default false
          */
-        browser: boolean;
+        browser: boolean
     }
 }

@@ -1,10 +1,10 @@
-export {}
+export { }
 
 declare global {
   var deshader: {
-    [protocol: string] : {
+    [protocol: string]: {
       address: string,
       port: number
     }
-  } | undefined;
+  } | undefined
 }
