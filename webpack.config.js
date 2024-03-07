@@ -30,7 +30,7 @@ const webExtensionConfig = {
 			'./descriptorFactory': false,
 			process: "process/browser",
 			"conditional-debug-session": "./session-base",
-			"assert": false,
+			"assert": require.resolve('assert'),
 		},
 		fallback: {
 			"fs": false,

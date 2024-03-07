@@ -99,9 +99,9 @@
                 "description": "Console used for communication between user and the debugged program"
               },
               "connection": {
-                "address": {
+                "host": {
                   "type": "string",
-                  "description": "Address to run at",
+                  "description": "Host to run at",
                   "default": "localhost"
                 },
                 "port": {
@@ -146,9 +146,9 @@
             ],
             "properties": {
               "connection": {
-                "address": {
+                "host": {
                   "type": "string",
-                  "description": "Address to run at",
+                  "description": "Host to run at",
                   "default": "localhost"
                 },
                 "port": {
@@ -232,7 +232,7 @@
             "type": "deshader",
             "request": "attach",
             "protocol": "http",
-            "address": "127.0.0.1",
+            "host": "127.0.0.1",
             "port": 8081,
             "showDebugOutput": false,
             "stopOnEntry": false
@@ -268,7 +268,7 @@
               "request": "attach",
               "name": "Deshader Attach",
               "protocol": "http",
-              "address": "127.0.0.1",
+              "host": "127.0.0.1",
               "port": 8081,
               "showDebugOutput": false,
               "stopOnEntry": false

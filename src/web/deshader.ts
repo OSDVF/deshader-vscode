@@ -31,7 +31,7 @@ export type EventArgs = {
     output: ["prio" | "out" | "err", DebugProtocol.OutputEvent['body']['group'], string, number, number]
     end: []
 }
-export type Config = { protocol: "ws" | "wss" | "http" | "https", address: string, port: number }
+export type Config = { protocol: "ws" | "wss" | "http" | "https", host: string, port: number }
 export type WithLength<T> = T & { length?: number }
 /**
  * Communicates through WS or HTTP with a running Deshader instance
@@ -82,7 +82,7 @@ export abstract class Communicator extends EventEmitter {
             case "wss":
                 return new WSCommunicator(vscode.Uri.from({
                     scheme: config.protocol,
-                    authority: `${config.address}:${config.port}`
+                    authority: `${config.host}:${config.port}`
                 }), output, open)
             default:
                 throw new Error(`Unknown protocol ${config.protocol}`)
@@ -217,7 +217,7 @@ export class WSCommunicator extends Communicator implements vscode.Disposable {
     pendingRequests: MapLike<{
         promise: Promise<any> | null,
         resolve: (response: Blob) => void
-        reject: (response: Blob) => void
+        reject: (response: string) => void
     }> = {};
 
     constructor(uri: vscode.Uri, output: vscode.OutputChannel, open = true) {
@@ -236,14 +236,16 @@ export class WSCommunicator extends Communicator implements vscode.Disposable {
 
             for (let [command, actions] of Object.entries(this.pendingRequests)) {
                 const responseLines: string[] = event.data.split('\n')//0: status, 1: echoed command, 2: body
-                if (responseLines.length > 1 &&
-                    responseLines[1].startsWith(command)) {
+                if (responseLines.length > 1 && responseLines[1] == command) {
                     const resp = responseLines.slice(2).join('\n')
                     this.emit(Events.message, resp)
                     if (responseLines[0].startsWith('202')) {
                         actions.resolve(new Blob([resp]))
+                    }
+                    else if(responseLines[0].startsWith('500')) {
+                        actions.reject(responseLines[2].slice(6))
                     } else {
-                        actions.reject(new Blob([resp]))
+                        actions.reject(resp)
                     }
                 }
             }
@@ -298,7 +300,7 @@ export class WSCommunicator extends Communicator implements vscode.Disposable {
                     },
                     async reject(response) {
                         clearTimeout(t)
-                        _reject(new Error(await response.text()))
+                        _reject(response)
                     }
                 }
             })

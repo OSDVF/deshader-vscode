@@ -250,7 +250,7 @@ export class DebugSession extends DebugSessionBase {
 
         if (this._comm == null) {
             await this.connectOwnedComm(args.connection || {
-                address: "localhost",
+                host: "localhost",
                 port: 8082,
                 protocol: "ws"
             })
