@@ -18,11 +18,11 @@
 		"noImplicitAny": false,
 		"paths": {
 			"conditional-debug-session": [
-				"./src/web/session-base.ts"
+				"./src/debug/session-base.ts"
 			]
 		}
 	},
 	"exclude": [
 		"node_modules"
-	]
+	],
 }

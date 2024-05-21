@@ -5,6 +5,6 @@ declare global {
     [protocol: string]: {
       host: string,
       port: number
-    }
+    },
   } | undefined
 }

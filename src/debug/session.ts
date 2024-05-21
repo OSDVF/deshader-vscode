@@ -2,45 +2,28 @@ import { DebugProtocol } from '@vscode/debugprotocol'
 import {
     logger,
     LoggingDebugSession,
+    Event,
     StoppedEvent, InitializedEvent, TerminatedEvent, BreakpointEvent, OutputEvent,
     ProgressStartEvent, ProgressUpdateEvent, ProgressEndEvent, InvalidatedEvent,
-    Thread, StackFrame, Scope, Source, Breakpoint, MemoryEvent, Logger
+    Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination
 } from '@vscode/debugadapter'
-import { Communicator, Config, Events } from './deshader'
+import { Communicator, Config, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent } from '../deshader'
 import { Subject } from 'await-notify'
 import * as vscode from 'vscode'
 import { DebugSessionBase } from 'conditional-debug-session'
-import assert = require('assert')
 import { basename } from 'path'
+import assert = require('assert')
 
-interface ILaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
-    /** An absolute path to the "program" to debug. */
-    program: string
-    /** Automatically stop target after launch. If not specified, target does not stop. */
-    stopOnEntry?: boolean
-    showDebugOutput?: boolean
-    args: string[]
-    cwd?: string
-    env?: { [key: string]: string }
-    console?: 'debugConsole' | 'integratedTerminal' | 'externalTerminal'
-    connection?: Config
-    showDevDebugOutput?: boolean
-}
+interface ILaunchRequestArguments extends DebugProtocol.LaunchRequestArguments, LaunchArguments { }
 
-interface IAttachRequestArguments extends DebugProtocol.LaunchRequestArguments {
-    connection: Config
-    showDebugOutput?: ILaunchRequestArguments['showDebugOutput']
-    stopOnEntry?: ILaunchRequestArguments['stopOnEntry']
-}
-
-interface IEmbeddedRequestArguments extends DebugProtocol.LaunchRequestArguments {
-    protocol: Config['protocol']
-    showDebugOutput?: ILaunchRequestArguments['showDebugOutput']
-    stopOnEntry?: ILaunchRequestArguments['stopOnEntry']
-}
+interface IAttachRequestArguments extends DebugProtocol.LaunchRequestArguments, AttachArguments { }
 
 export class DebugSession extends DebugSessionBase {
     static connectionNotOpen = "Connection not open";
+    public shaders: RunningShader[] = [];
+    // index into this.shaders
+    public currentShader = 0;
+    public singlePauseMode = false;
 
     private _comm: Communicator | null
     private _ownsComm = true;
@@ -56,8 +39,6 @@ export class DebugSession extends DebugSessionBase {
 
     private _valuesInHex = false;
     private _useInvalidatedEvent = false;
-
-    private _addressesInHex = true;
 
     /**
      * Creates a new debug adapter that is used for one debug session.
@@ -77,12 +58,13 @@ export class DebugSession extends DebugSessionBase {
 
         }
         this.setupEvents()
+        this.setDebuggerPathFormat('deshader') // Everything other that 'path' is considered as an URI
     }
 
     dispose() {
         if (this._ownsComm) {
             this._comm?.output.dispose()
-            this._comm?.dispose()
+            this._comm?.disconnect()
         }
         super.dispose()
     }
@@ -90,22 +72,28 @@ export class DebugSession extends DebugSessionBase {
     setupEvents() {
         assert(this._comm != null)
         // setup event handlers
-        this._comm.on<'stopOnEntry'>(Events.stopOnEntry, (threadID) => {
-            this.sendEvent(new StoppedEvent('entry', threadID))
+        this._comm.onJson<'stop'>(Events.stop, params => {
+            if (params.step == 0) {
+                this.sendEvent(new StoppedEvent('entry', params.shader))
+            } else
+                this.sendEvent(new StoppedEvent('step', params.shader))
         })
-        this._comm.on<'stopOnStep'>(Events.stopOnStep, (threadID) => {
-            this.sendEvent(new StoppedEvent('step', threadID))
+        this._comm.onJson<'stopOnBreakpoint'>(Events.stopOnBreakpoint, (params) => {
+            this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.shader, hitBreakpointIds: params.ids })))
         })
-        this._comm.on<'stopOnBreakpoint'>(Events.stopOnBreakpoint, (threadID) => {
-            this.sendEvent(new StoppedEvent('breakpoint', threadID))
-        })
-        this._comm.on<'stopOnDataBreakpoint'>(Events.stopOnDataBreakpoint, (threadID) => {
+        this._comm.onJson<'stopOnDataBreakpoint'>(Events.stopOnDataBreakpoint, (threadID) => {
             this.sendEvent(new StoppedEvent('data breakpoint', threadID))
         })
-        this._comm.on<'breakpointValidated'>(Events.breakpointValidated, (bp: DebugProtocol.Breakpoint) => {
-            this.sendEvent(new BreakpointEvent('changed', bp))
+        this._comm.onJson<'breakpoint'>(Events.breakpoint, (event: DeshaderBreakpointEvent) => {
+            this.sendEvent(new BreakpointEvent(event.reason, this.convertDebuggerBreakpointToClient(event.breakpoint)))
         })
-        this._comm.on<'output'>(Events.output, (type, text, filePath, line, column) => {
+        this._comm.onJson<'invalidated'>(Events.invalidated, (event) => {
+            if (this._useInvalidatedEvent) {
+                this.sendEvent(new InvalidatedEvent(event.areas, event.threadId, event.stackFrameId))
+            }
+        })
+        this._comm.onJson<'output'>(Events.output, (args: EventArgs['output']) => {
+            const [type, text, source, line, column] = args
 
             let category: string
             switch (type) {
@@ -121,7 +109,7 @@ export class DebugSession extends DebugSessionBase {
                 e.body.output = `group-${text}\n`
             }
 
-            e.body.source = this.createSource(filePath)
+            e.body.source = this.pathToSource(source)
             e.body.line = this.convertDebuggerLineToClient(line)
             e.body.column = this.convertDebuggerColumnToClient(column)
             this.sendEvent(e)
@@ -135,7 +123,7 @@ export class DebugSession extends DebugSessionBase {
      * The 'initialize' request is the first request called by the frontend
      * to interrogate the features the debug adapter provides.
      */
-    protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
+    protected async initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): Promise<void> {
 
         if (args.supportsProgressReporting) {
             this._reportProgress = true
@@ -164,7 +152,7 @@ export class DebugSession extends DebugSessionBase {
         response.body.completionTriggerCharacters = ["."]
 
         // make VS Code send cancel request
-        response.body.supportsCancelRequest = true
+        response.body.supportsCancelRequest = false
 
         // make VS Code send the breakpointLocations request
         response.body.supportsBreakpointLocationsRequest = true
@@ -194,13 +182,20 @@ export class DebugSession extends DebugSessionBase {
 
         response.body.supportSuspendDebuggee = false
         response.body.supportTerminateDebuggee = true
-        response.body.supportsFunctionBreakpoints = false
+        response.body.supportsRestartRequest = true // graphics API cannot be 'restarted'. TODO would be restarting the application useful?
+        response.body.supportsRestartFrame = false
+        response.body.supportsFunctionBreakpoints = true
         response.body.supportsDelayedStackTraceLoading = true
+        response.body.supportsSingleThreadExecutionRequests = false
 
         response.body.supportsConditionalBreakpoints = true
         response.body.supportsGotoTargetsRequest = false
         response.body.supportsHitConditionalBreakpoints = true
         response.body.supportsLogPoints = true
+        if (this._comm === null) {
+            response.success = false
+            response.message = DebugSession.connectionNotOpen
+        }
 
         this.sendResponse(response)
 
@@ -208,6 +203,17 @@ export class DebugSession extends DebugSessionBase {
         // we request them early by sending an 'initializeRequest' to the frontend.
         // The frontend will end the configuration sequence by calling 'configurationDone' request.
         this.sendEvent(new InitializedEvent())
+        if (this._comm) {
+            const state = await this._comm.state({ seq: response.request_seq })
+            this.singlePauseMode = state.singlePauseMode
+            this.processPushedBreakpoints(state.breakpoints)
+        }
+    }
+
+    private processPushedBreakpoints(breakpoints: Breakpoint[]) {
+        for (const bp of breakpoints) {
+            this.sendEvent(new BreakpointEvent('new', this.convertDebuggerBreakpointToClient(bp)))
+        }
     }
 
     /**
@@ -221,12 +227,23 @@ export class DebugSession extends DebugSessionBase {
         this._configurationDone.notify()
     }
 
-    protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments, request?: DebugProtocol.Request): void {
+    protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): void {
         console.log(`disconnectRequest suspend: ${args.suspendDebuggee}, terminate: ${args.terminateDebuggee}`)
         if (this._ownsComm) {
             this._comm?.output.dispose()
-            this._comm?.dispose()
+            this._comm?.disconnect()
         }
+        this.sendResponse(response)
+    }
+
+    protected terminateRequest(response: DebugProtocol.TerminateResponse, args: DebugProtocol.TerminateArguments | undefined): void {
+        if (this._comm === null) {
+            response.success = false
+            response.message = DebugSession.connectionNotOpen
+        } else {
+            this._comm.terminate({ ...args, seq: response.request_seq })
+        }
+        this.sendResponse(response)
     }
 
     async connectOwnedComm(config: Config) {
@@ -239,7 +256,24 @@ export class DebugSession extends DebugSessionBase {
     protected async attachRequest(response: DebugProtocol.AttachResponse, args: IAttachRequestArguments) {
         if (this._comm == null) {
             await this.connectOwnedComm(args.connection)
+        } else {
+            await this._comm.ensureConnected()
         }
+        await this._configurationDone.wait(1000)
+        const breakpointsFromSource = await this._comm!.debug({ ...args, seq: response.request_seq })
+        response.body ||= {}
+
+        this.sendResponse(response)
+        setTimeout(() => this.processPushedBreakpoints(breakpointsFromSource), 500)
+        this.sendRequest("runInTerminal", <DebugProtocol.RunInTerminalRequestArguments>{
+            title: "Test",
+            args: ["help"],
+            kind: "integrated",
+            cwd: "${workspaceFolder}",
+            argsCanBeInterpretedByShell: true,
+        }, 1000, (response) => {
+            console.log("RIT response", response)
+        })
     }
 
     protected async launchRequest(response: DebugProtocol.LaunchResponse, args: ILaunchRequestArguments) {
@@ -254,36 +288,44 @@ export class DebugSession extends DebugSessionBase {
                 port: 8082,
                 protocol: "ws"
             })
+        } else {
+            await this._comm.ensureConnected()
         }
 
         // wait 1 second until configuration has finished (and configurationDoneRequest has been called)
         await this._configurationDone.wait(1000)
+        response.body ||= {}
 
         // start the program in the runtime
         //await this._comm.start(args.program, !!args.stopOnEntry, !args.noDebug);
 
         this.sendResponse(response)
+        //setTimeout(()=>this.processPushedBreakpoints(breakpointsFromSource), 500)
     }
 
-    convertDebuggerBreakpointToClient(bp: DebugProtocol.Breakpoint): DebugProtocol.Breakpoint {
+    convertDebuggerBreakpointToClient(bp: Breakpoint): DebugProtocol.Breakpoint {
+        let result: DebugProtocol.Breakpoint = { verified: bp.verified }
         if (bp.line)
-            bp.line = this.convertDebuggerLineToClient(bp.line)
+            result.line = this.convertDebuggerLineToClient(bp.line)
         if (bp.column)
-            bp.column = this.convertDebuggerColumnToClient(bp.column)
+            result.column = this.convertDebuggerColumnToClient(bp.column)
         if (bp.endColumn)
-            bp.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
+            result.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
         if (bp.endLine)
-            bp.endLine = this.convertDebuggerLineToClient(bp.endLine)
+            result.endLine = this.convertDebuggerLineToClient(bp.endLine)
+        if (bp.path)
+            result.source = this.pathToSource(bp.path)
         return bp
     }
 
-    protected async setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments, request?: DebugProtocol.Request): Promise<void> {
+    protected async setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): Promise<void> {
         if (this._comm === null) {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
+            response.body = { breakpoints: [] }
             for (const bp of args.breakpoints) {
-                response.body.breakpoints.push(this.convertDebuggerBreakpointToClient(await this._comm.setFunctionBreakpoint(bp)))
+                response.body.breakpoints.push(this.convertDebuggerBreakpointToClient(await this._comm.setFunctionBreakpoint({ ...bp, seq: response.request_seq })))
             }
         }
         this.sendResponse(response)
@@ -294,16 +336,17 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            const path = args.source.path as string
+            const path = this.sourceToPath(args.source)
 
             // clear all breakpoints for this file
-            this._comm.clearBreakpoints(path)
+            this._comm.clearBreakpoints({ path, seq: response.request_seq })
 
             // set and verify breakpoint locations
             const actualBreakpoints0 = (args.breakpoints || []).map(async l => {
-                let bp = await this._comm!.setBreakpoint(path, this.convertClientLineToDebugger(l.line), 0)
-                bp = this.convertDebuggerBreakpointToClient(bp)
-                return bp
+                let bp = await this._comm!.addBreakpoint({
+                    path, line: this.convertClientLineToDebugger(l.line), column: this.convertClientColumnToDebugger(l.column ?? 0), seq: response.request_seq
+                })
+                return this.convertDebuggerBreakpointToClient(bp)
             })
             const actualBreakpoints = await Promise.all<DebugProtocol.Breakpoint>(actualBreakpoints0)
 
@@ -313,39 +356,41 @@ export class DebugSession extends DebugSessionBase {
             }
         }
         this.sendResponse(response)
+
     }
 
-    protected async breakpointLocationsRequest(response: DebugProtocol.BreakpointLocationsResponse, args: DebugProtocol.BreakpointLocationsArguments, request?: DebugProtocol.Request): Promise<void> {
+    protected async breakpointLocationsRequest(response: DebugProtocol.BreakpointLocationsResponse, args: DebugProtocol.BreakpointLocationsArguments): Promise<void> {
         if (this._comm == null) {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            if (args.source.path) {
-                args.line = this.convertClientLineToDebugger(args.line)
-                if (args.endLine)
-                    args.endLine = this.convertClientLineToDebugger(args.endLine)
-                if (args.column)
-                    args.column = this.convertClientColumnToDebugger(args.column)
-                if (args.endColumn)
-                    args.column = this.convertClientColumnToDebugger(args.endColumn)
 
-                const bps = await this._comm.getBreakpoints(args)
-                response.body = {
-                    breakpoints: bps.map(bp => {
-                        bp.line = this.convertDebuggerLineToClient(bp.line)
-                        if (bp.column)
-                            bp.column = this.convertDebuggerColumnToClient(bp.column)
-                        if (bp.endLine)
-                            bp.endLine = this.convertDebuggerLineToClient(bp.endLine)
-                        if (bp.endColumn)
-                            bp.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
-                        return bp
-                    })
-                }
-            } else {
-                response.body = {
-                    breakpoints: []
-                }
+            args.line = this.convertClientLineToDebugger(args.line)
+            if (args.endLine)
+                args.endLine = this.convertClientLineToDebugger(args.endLine)
+            if (args.column)
+                args.column = this.convertClientColumnToDebugger(args.column)
+            if (args.endColumn)
+                args.column = this.convertClientColumnToDebugger(args.endColumn)
+
+            const newArgs = {
+                path: this.sourceToPath(args.source),
+                ...args,
+                seq: response.request_seq
+            }
+            delete (<any>newArgs).source
+            const bps = await this._comm.possibleBreakpoints(newArgs)
+            response.body = {
+                breakpoints: bps.map(bp => {
+                    bp.line = this.convertDebuggerLineToClient(bp.line)
+                    if (bp.column)
+                        bp.column = this.convertDebuggerColumnToClient(bp.column)
+                    if (bp.endLine)
+                        bp.endLine = this.convertDebuggerLineToClient(bp.endLine)
+                    if (bp.endColumn)
+                        bp.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
+                    return bp
+                })
             }
         }
         this.sendResponse(response)
@@ -357,11 +402,11 @@ export class DebugSession extends DebugSessionBase {
             response.message = DebugSession.connectionNotOpen
         }
         else {
-            const stk = await this._comm?.stackTrace(args)
+            const stk = await this._comm?.stackTrace({ ...args, seq: response.request_seq })
 
             response.body = {
-                stackFrames: stk.map(f => {
-                    const sf: DebugProtocol.StackFrame = new StackFrame(f.id, f.name, this.createSource(f.source!.path!), this.convertDebuggerLineToClient(f.line))
+                stackFrames: stk.stackFrames.map(f => {
+                    const sf: DebugProtocol.StackFrame = new StackFrame(f.id, f.name, this.pathToSource(f.path), this.convertDebuggerLineToClient(f.line))
                     if (typeof f.column === 'number') {
                         sf.column = this.convertDebuggerColumnToClient(f.column)
                     }
@@ -376,11 +421,12 @@ export class DebugSession extends DebugSessionBase {
                 }),
                 // 4 options for 'totalFrames':
                 //omit totalFrames property: 	// VS Code has to probe/guess. Should result in a max. of two requests
-                totalFrames: stk.length			// stk.count is the correct size, should result in a max. of two requests
+                totalFrames: stk.totalFrames			// stk.totalFrames is the correct size, should result in a max. of two requests
                 //totalFrames: 1000000 			// not the correct size, should result in a max. of two requests
                 //totalFrames: endFrame + 20 	// dynamically increases the size with every requested chunk, results in paging
             }
         }
+        this.currentShader = args.threadId
         this.sendResponse(response)
     }
 
@@ -389,9 +435,51 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body.scopes = await this._comm.scopes(args)
+            response.body = { scopes: await this._comm.scopes({ ...args, seq: response.request_seq }) }
         }
         this.sendResponse(response)
+    }
+
+    protected async threadsRequest(response: DebugProtocol.ThreadsResponse): Promise<void> {
+        if (this._comm == null) {
+            response.success = false
+            response.message = DebugSession.connectionNotOpen
+        } else {
+            const threads = await this._comm.runningShaders(response.request_seq)
+            this.shaders = threads
+            const resultThreads = this.convertThreads(threads)
+            response.body = { threads: resultThreads }
+        }
+        this.sendResponse(response)
+    }
+
+    private convertThreads(shaders: RunningShader[]): DebugProtocol.Thread[] {
+        const resultThreads: DebugProtocol.Thread[] = []
+        for (const shader of shaders) {
+            let dimensions = ""
+            let selectedThread = ""
+            if (shader.groupCount && shader.selectedGroup) {
+                dimensions = shader.groupCount[0].toString()
+                for (let i = 1; i < shader.groupCount.length; i++) {
+                    dimensions += `,${shader.groupCount[i]}`
+                    selectedThread += `,${shader.selectedGroup[i]}`
+                }
+                dimensions += "><"
+                selectedThread += ")("
+            }
+            dimensions += shader.groupDim[0].toString()
+            selectedThread += shader.selectedThread[0].toString()
+            for (let i = 1; i < shader.groupDim.length; i++) {
+                dimensions += `,${shader.groupDim[i]}`
+                selectedThread += `,${shader.selectedThread[i]}`
+            }
+
+            resultThreads.push({
+                id: shader.id,
+                name: `${shader.name}<${dimensions}>(${selectedThread})`,
+            })
+        }
+        return resultThreads
     }
 
     protected async writeMemoryRequest(response: DebugProtocol.WriteMemoryResponse, args: DebugProtocol.WriteMemoryArguments) {
@@ -399,7 +487,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body = await this._comm.writeMemory(args)
+            response.body = await this._comm.writeMemory({ ...args, seq: response.request_seq })
         }
 
         this.sendResponse(response)
@@ -410,18 +498,18 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body = await this._comm.readMemory(args)
+            response.body = await this._comm.readMemory({ ...args, seq: response.request_seq })
         }
 
         this.sendResponse(response)
     }
 
-    protected async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments, request?: DebugProtocol.Request): Promise<void> {
+    protected async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments): Promise<void> {
         if (this._comm == null) {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body.variables = await this._comm.variables(args)
+            response.body = { variables: await this._comm.variables({ ...args, seq: response.request_seq }) }
         }
         this.sendResponse(response)
     }
@@ -431,7 +519,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            const resp = await this._comm.setVariable(args)
+            const resp = await this._comm.setVariable({ ...args, seq: response.request_seq })
             response.body = resp
             if (resp.memoryReference) {
                 this.sendEvent(new MemoryEvent(String(resp.memoryReference), 0, resp.length!))
@@ -445,18 +533,17 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            await this._comm.continue()
+            await this._comm.continue(response.request_seq)
         }
         this.sendResponse(response)
     }
 
-    protected nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
+    protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): Promise<void> {
         if (this._comm == null) {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            const thread = args.singleThread !== false ? args.threadId : undefined
-            this._comm[args.granularity == 'statement' ? 'stepStatement' : 'stepLine'](thread)
+            await this._comm.next({ ...args, seq: response.request_seq })
         }
         this.sendResponse(response)
     }
@@ -466,7 +553,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            const targets = await this._comm.getStepInTargets(args.frameId)
+            const targets = await this._comm.getStepInTargets({ ...args, seq: response.request_seq })
             response.body = {
                 targets: targets.map(t => {
                     if (t.column)
@@ -489,7 +576,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            await this._comm.stepIn(args)
+            await this._comm.stepIn({ ...args, seq: response.request_seq })
         }
         this.sendResponse(response)
     }
@@ -499,7 +586,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            await this._comm.stepOut(args)
+            await this._comm.stepOut({ ...args, seq: response.request_seq })
         }
         this.sendResponse(response)
     }
@@ -509,7 +596,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body = await this._comm.evaluate(args)
+            response.body = await this._comm.evaluate({ ...args, seq: response.request_seq })
         }
         this.sendResponse(response)
     }
@@ -519,7 +606,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body = await this._comm.setExpression(args)
+            response.body = await this._comm.setExpression({ ...args, seq: response.request_seq })
         }
 
         this.sendResponse(response)
@@ -530,7 +617,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body = await this._comm.dataBreakpointInfo(args)
+            response.body = await this._comm.dataBreakpointInfo({ ...args, seq: response.request_seq })
         }
 
         this.sendResponse(response)
@@ -542,14 +629,14 @@ export class DebugSession extends DebugSessionBase {
             response.message = DebugSession.connectionNotOpen
         } else {
             // clear all data breakpoints
-            this._comm.clearAllDataBreakpoints()
+            this._comm.clearDataBreakpoints(response.request_seq)
 
             response.body = {
                 breakpoints: []
             }
 
             for (const dbp of args.breakpoints) {
-                const bp = await this._comm.setDataBreakpoint(dbp)
+                const bp = await this._comm.setDataBreakpoint({ ...dbp, seq: response.request_seq })
                 response.body.breakpoints.push(bp)
             }
         }
@@ -561,40 +648,67 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            response.body.targets = await this._comm.completion(args)
+            response.body = { targets: await this._comm.completion({ ...args, seq: response.request_seq }) }
         }
         this.sendResponse(response)
     }
 
-    protected async cancelRequest(response: DebugProtocol.CancelResponse, args: DebugProtocol.CancelArguments) {
-        if (this._comm == null) {
-            response.success = false
-            response.message = DebugSession.connectionNotOpen
-        } else {
-            await this._comm.cancel(args)
-            if (args.requestId) {
-                this._cancellationTokens.set(args.requestId, true)
-            }
-            if (args.progressId) {
-                this._cancelledProgressId = args.progressId
-            }
+    protected async customRequest(command: string, response: DebugProtocol.Response, args: any) {
+        switch (command) {
+            case 'toggleFormatting':
+                this._valuesInHex = !this._valuesInHex
+                if (this._useInvalidatedEvent) {
+                    this.sendEvent(new InvalidatedEvent(['variables']))
+                }
+                break
+            case 'getCurrentShader':
+                response.body = this.shaders[this.currentShader]
+                break
+            case 'getPauseMode':
+                response.body = this.singlePauseMode
+                break
+            case 'updateStackItem':
+                const item = <vscode.StackFrame | vscode.Thread>args
+                this.currentShader = item.threadId
+                break
+            case 'selectThread':
+                if (this._comm == null) {
+                    response.success = false
+                    response.message = DebugSession.connectionNotOpen
+                } else {
+                    await this._comm.selectThread({ shader: this.currentShader, thread: args.thread, group: args.group, seq: response.request_seq })
+                }
+                break
+            case 'pauseMode':
+                if (this._comm == null) {
+                    response.success = false
+                    response.message = DebugSession.connectionNotOpen
+                } else {
+                    await this._comm.pauseMode({ seq: response.request_seq, single: args.single })// TODO detect errors
+                    this.singlePauseMode = args.single
+                }
+                break
+            default: this.sendErrorResponse(response, 1014, 'unrecognized request', null, ErrorDestination.Telemetry)
         }
+
         this.sendResponse(response)
     }
 
-    protected customRequest(command: string, response: DebugProtocol.Response, args: any) {
-        if (command === 'toggleFormatting') {
-            this._valuesInHex = !this._valuesInHex
-            if (this._useInvalidatedEvent) {
-                this.sendEvent(new InvalidatedEvent(['variables']))
-            }
-            this.sendResponse(response)
-        } else {
-            super.customRequest(command, response, args)
-        }
+    // debugger paths do not include deshader: scheme
+    private pathToSource(path: string): Source {
+        return new Source(basename(path),
+            // path contains leading slash
+            `deshader:${path}`,
+        )
     }
 
-    private createSource(filePath: string, id?: number): Source {
-        return new Source(basename(filePath), this.convertDebuggerPathToClient(filePath), id)
+    // debugger paths do not include deshader: scheme
+    private sourceToPath(source: DebugProtocol.Source): string {
+        if (source.path) {
+            const parsed = vscode.Uri.parse(source.path)// assumes one leading slash after protocol
+            return parsed.path
+        } else {
+            return `/untagged/${source.sourceReference!}`
+        }
     }
 }

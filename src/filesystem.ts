@@ -1,9 +1,3 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
-
 import * as path from 'path'
 import * as vscode from 'vscode'
 import { Communicator, Config } from './deshader'
@@ -48,84 +42,80 @@ export class Directory implements vscode.FileStat {
 }
 
 export type Entry = File | Directory
-type PromiseOr<T> = Promise<T> | T
 
 export class DeshaderFilesystem implements vscode.FileSystemProvider {
+	static scheme = 'deshader'
 	root = new Directory('');
 	output: vscode.OutputChannel
 	comm: Communicator
 
-	private liveWorkspace: string
+	private vscodeVirtual: {
+		[key: string]: string
+	} = {}
 
 	constructor(output: vscode.OutputChannel, comm: Communicator, connection?: Config) {
 		output.appendLine(`Mounting filesystem with communicator ${comm.uri.toString()}`)
 		this.output = output
 		this.comm = comm
-		this.liveWorkspace =
-			JSON.stringify({
-				folders: [
+		this.vscodeVirtual = {
+			"launch.json": JSON.stringify({
+				configurations: [
 					{
-						path: 'sources',
-					},
-					{
-						path: 'programs'
-					},
-					{
-						path: 'workspace'
+						name: "Deshader Integrated",
+						type: "deshader",
+						request: "attach",
+						connection: connection ?? {
+							protocol: "ws",
+							host: "localhost",
+							port: 8081
+						},
+						stopOnEntry: true
 					}
-				],
-				launch: {
-					configurations: [
-						{
-							name: "Deshader embedded",
-							type: "deshader",
-							request: "attach",
-							connection: connection ?? {
-								protocol: "ws",
-								host: "localhost",
-								port: 8081
-							},
-							stopOnEntry: true
-						}
-					]
-				}
+				]
+			}),
+			"settings.json": JSON.stringify({}),
+			"extensions.json": JSON.stringify({
+				recommendations: ["osdvf.deshader-vscode", "filippofracascia.glsl-language-support"]
 			})
+		}
 	}
 
 	// --- manage file metadata
 
 	async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
-		if (uri.path === '/live-app.code-workspace') {
+		const codeRoot = uri.path.indexOf("/.vscode")
+		if (codeRoot != -1) {
+			const id = uri.path.substring(codeRoot + 9);
+			if(!id) {
+				return {
+					type:vscode.FileType.Directory,
+					permissions: vscode.FilePermission.Readonly,
+					ctime: Date.now(),
+					mtime: Date.now(),
+					size: 0
+				}
+			}
+			const target = this.vscodeVirtual[id]
 			return {
 				type: vscode.FileType.File,
 				permissions: vscode.FilePermission.Readonly,
 				ctime: Date.now(),
 				mtime: Date.now(),
-				size: this.liveWorkspace.length
+				size: target.length
 			}
 		}
-		let result
 		try {
-			switch (uri.path.substring(0, 8)) {
-				case '/sources':
-					result = await this.comm.statSource(uri.path.slice(8))
-					break
-				case '/program':
-					result = await this.comm.statProgram(uri.path.slice(9))
-					break
-				case '/workspa':
-					result = await this.comm.stat(uri.path.slice(10))
-					break
-			}
+			this.comm.ensureConnected()
+			const result = await this.comm.stat({ path: uri.path })
+			this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`)
+			return result
 		}
 		catch (e) {
 			if (typeof e == 'string') {
-				DeshaderFilesystem.throwDeshaderError(e, uri)
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
 			} else throw e
 		}
 
-		this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`)
-		return result
 	}
 
 	static convertList(list: string[]): [string, vscode.FileType][] {
@@ -146,38 +136,37 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		return result
 	}
 
-	static throwDeshaderError(e: string, uri: vscode.Uri) {
+	static throwDeshaderError(e: string, uri: vscode.Uri): string | vscode.FileSystemError {
 		switch (e) {
 			case 'DirectoryNotFound':
 			case 'TargetNotFound':
 			case 'NotTagged':
-				throw vscode.FileSystemError.FileNotFound(uri)
+				return vscode.FileSystemError.FileNotFound(uri)
 			case 'TagExists':
 			case 'DirExists':
-				throw vscode.FileSystemError.FileExists(uri)
+				return vscode.FileSystemError.FileExists(uri)
+			default: return e
 		}
 	}
 
 	async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
-		let list
+		const codeRoot = uri.path.indexOf("/.vscode")
+		if(codeRoot != -1) {
+			return DeshaderFilesystem.convertList(Object.keys(this.vscodeVirtual))
+		}
+		
+		let list: string[] = []
 		try {
-			switch (uri.path.substring(0, 8)) {
-				case '/sources':
-					list = await this.comm.listSources(uri.path.slice(8))
-					break
-				case '/program':
-					list = await this.comm.listPrograms(uri.path.slice(9))
-					break
-				case '/workspa':
-					list = await this.comm.listWorkspace(uri.path.slice(10))
-					break
+			this.comm.ensureConnected()
+			list = await this.comm.list({ path: uri.path.endsWith("/") ? uri.path : uri.path + "/" })
+			if(uri.path === "/") {
+				list.push(".vscode/")
 			}
 		} catch (e) {
 			if (typeof e == 'string') {
 				DeshaderFilesystem.throwDeshaderError(e, uri)
 			} else throw e
 		}
-		this.output.appendLine(`Read dir ${uri.toString()} result: ${JSON.stringify(list)}`)
 		return DeshaderFilesystem.convertList(list)
 	}
 
@@ -185,30 +174,17 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 
 	async readFile(uri: vscode.Uri): Promise<Uint8Array> {
 		this.output.appendLine(`Reading ${uri.toString()}`)
-		if (uri.path === '/live-app.code-workspace') {
-			this.output.appendLine('Reading workspace file')
-			return new TextEncoder().encode(this.liveWorkspace)
+		const codeRoot = uri.path.indexOf("/.vscode")
+		if (codeRoot != -1) {
+			return new TextEncoder().encode(this.vscodeVirtual[uri.path.substring(codeRoot + 9)])
 		}
-		let data
 		try {
-			switch (uri.path.substring(0, 8)) {
-				case '/sources':
-					data = await this.comm.readFile(uri.path.slice(8))
-					break
-				case '/program':
-					data = await this.comm.readFile(uri.path.slice(9))
-					break
-				case '/workspa':
-					data = await this.comm.readFile(uri.path.slice(10))
-					break
-			}
+			this.comm.ensureConnected()
+			return new TextEncoder().encode(await this.comm.readFile({ path: uri.path }))
 		} catch (e) {
 			if (typeof e == 'string') {
 				DeshaderFilesystem.throwDeshaderError(e, uri)
 			} else throw e
-		}
-		if (data) {
-			return new TextEncoder().encode(data)
 		}
 		throw vscode.FileSystemError.FileNotFound()
 	}
