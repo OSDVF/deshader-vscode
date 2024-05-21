@@ -668,7 +668,7 @@ export class DebugSession extends DebugSessionBase {
                 response.body = this.singlePauseMode
                 break
             case 'updateStackItem':
-                const item = <vscode.StackFrame | vscode.Thread>args
+                const item = <vscode.DebugStackFrame | vscode.DebugThread>args
                 this.currentShader = item.threadId
                 break
             case 'selectThread':

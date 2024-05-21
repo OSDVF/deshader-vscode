@@ -318,9 +318,6 @@
       }
     }
   },
-  "enabledApiProposals": [
-    "debugFocus"
-  ],
   "scripts": {
     "test": "vscode-test-web --extensionDevelopmentPath=. --extensionTestsPath=dist/web/test/suite/index.js",
     "pretest": "npm run compile-web",
@@ -328,7 +325,6 @@
     "compile-web": "webpack",
     "watch-web": "webpack --watch",
     "package-web": "webpack --mode production --devtool hidden-source-map",
-    "proposed": "bunx @vscode/dts dev",
     "lint": "eslint src --ext ts",
     "run-in-browser": "vscode-test-web --browserType=chromium --extensionDevelopmentPath=. ."
   },
@@ -341,7 +337,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.2",
     "@types/node": "^20.10.4",
-    "@types/vscode": "^1.83.0",
+    "@types/vscode": "^1.89.0",
     "@types/webpack-env": "^1.18.2",
     "@typescript-eslint/eslint-plugin": "^6.7.3",
     "@typescript-eslint/parser": "^6.7.3",
