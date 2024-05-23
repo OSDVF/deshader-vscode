@@ -55,6 +55,7 @@ export type State = {
     debugging: boolean,
     breakpoints: Breakpoint[],
     runningShaders: RunningShader[],
+    paused: boolean,
     singlePauseMode: boolean,
     lsp?: number,//port number
 }
@@ -80,9 +81,7 @@ export type LaunchArguments = {
 type SourceToPath<T> = Omit<T, "source"> & { path: string }
 export type Breakpoint = SourceToPath<DebugProtocol.Breakpoint>
 export type BreakpointLocation = SourceToPath<DebugProtocol.BreakpointLocationsArguments>
-export type BreakpointRequest = {
-    path: string, line: number, column: number
-} & Seq
+export type BreakpointRequest = SourceToPath<DebugProtocol.SetBreakpointsArguments> & Seq
 export type BreakpointEvent = {
     reason: 'changed' | 'new' | 'removed' | string
     breakpoint: Breakpoint
@@ -224,8 +223,8 @@ export abstract class Communicator extends EventEmitter implements vscode.Dispos
     setFunctionBreakpoint(breakpoint: DebugProtocol.FunctionBreakpoint & Seq): Promise<Breakpoint> {
         return this.sendParametricJson<Breakpoint>('setFunctionBreakpoint', breakpoint)
     }
-    addBreakpoint(req: BreakpointRequest): Promise<Breakpoint> {
-        return this.sendParametricJson<Breakpoint>('addBreakpoint', req)
+    setBreakpoints(req: BreakpointRequest): Promise<Breakpoint[]> {
+        return this.sendParametricJson<Breakpoint[]>('setBreakpoints', req)
     }
     async clearBreakpoints(req: PathRequest): Promise<void> {
         await this.sendParametric('clearBreakpoints', req)
@@ -257,8 +256,8 @@ export abstract class Communicator extends EventEmitter implements vscode.Dispos
     scopes(args: DebugProtocol.ScopesArguments & Seq): Promise<DebugProtocol.Scope[]> {
         return this.sendParametricJson<DebugProtocol.Scope[]>('scopes', args)
     }
-    async continue(seq?: number): Promise<void> {
-        await this.sendParametric('continue', { seq })
+    async continue(req?: DebugProtocol.ContinueArguments & Seq): Promise<void> {
+        await this.sendParametric('continue', req)
     }
     getStepInTargets(req: DebugProtocol.StepInTargetsArguments & Seq): Promise<DebugProtocol.StepInTarget[]> {
         return this.sendParametricJson<DebugProtocol.StepInTarget[]>('getStepInTargets', req)
@@ -471,7 +470,7 @@ function splitStringToNParts(str: string, separator: string, n: number) {
     let count = 0
 
     for (let i = 0; i < str.length; i++) {
-        if (str.substr(i, separator.length) === separator) {
+        if (str.substring(i, i + separator.length) === separator) {
             if (count < n - 1) {
                 parts.push(temp)
                 temp = ''

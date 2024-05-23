@@ -20,9 +20,10 @@
 			"conditional-debug-session": [
 				"./src/debug/session-base.ts"
 			]
-		}
+		},
 	},
 	"exclude": [
-		"node_modules"
+		"node_modules",
+		"proposed.ts"
 	],
 }

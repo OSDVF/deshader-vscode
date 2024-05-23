@@ -325,7 +325,7 @@
     "compile-web": "webpack",
     "watch-web": "webpack --watch",
     "package-web": "webpack --mode production --devtool hidden-source-map",
-    "proposed": "bunx download-cli https://raw.githubusercontent.com/microsoft/vscode/c4653faeb1dac658945e8792b5858ef95b2da3d7/src/vscode-dts/vscode.proposed.debugFocus.d.ts > vscode.proposed.debugFocus.d.ts",
+    "proposed": "bun proposed.ts",
     "lint": "eslint src --ext ts",
     "run-in-browser": "vscode-test-web --browserType=chromium --extensionDevelopmentPath=. ."
   },

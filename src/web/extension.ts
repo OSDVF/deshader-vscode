@@ -233,7 +233,7 @@ export function activate(context: vscode.ExtensionContext) {
 			state = {
 				comm,
 				fs: vscode.workspace.registerFileSystemProvider('deshader', new DeshaderFilesystem(output, comm), { isCaseSensitive: true, isReadonly: false }),
-				debug: vscode.debug.registerDebugAdapterDescriptorFactory('deshader', new InlineDebugAdapterFactory(comm)),
+				debug: vscode.debug.registerDebugAdapterDescriptorFactory('deshader', new InlineDebugAdapterFactory(comm, output)),
 				languageClient: lspPort == null ? null : deshaderLanguageClient(`ws://${comm.getHost()}:${lspPort}/`,)
 			}
 			context.subscriptions.push(state.fs, state.comm, state.debug)
@@ -281,12 +281,14 @@ export function deactivate() { }
 
 class InlineDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
 	comm: Communicator | null
-	constructor(comm: Communicator | null) {
+	outputChannel: vscode.OutputChannel | null
+	constructor(comm: Communicator | null, outputChannel: vscode.OutputChannel | null = null) {
 		this.comm = comm
+		this.outputChannel = outputChannel
 	}
 
 	createDebugAdapterDescriptor(_session: vscode.DebugSession): ProviderResult<vscode.DebugAdapterDescriptor> {
 		// since DebugAdapterInlineImplementation is proposed API, a cast to <any> is required for now
-		return <any>new vscode.DebugAdapterInlineImplementation(new DebugSession(this.comm) as any as vscode.DebugAdapter)
+		return <any>new vscode.DebugAdapterInlineImplementation(new DebugSession(this.comm, this.outputChannel) as any as vscode.DebugAdapter)
 	}
 }

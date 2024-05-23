@@ -23,6 +23,7 @@ export class DebugSession extends DebugSessionBase {
     public shaders: RunningShader[] = [];
     // index into this.shaders
     public currentShader = 0;
+    public outputChannel: vscode.OutputChannel | null = null;
     public singlePauseMode = false;
 
     private _comm: Communicator | null
@@ -44,8 +45,9 @@ export class DebugSession extends DebugSessionBase {
      * Creates a new debug adapter that is used for one debug session.
      * We configure the default implementation of a debug adapter here.
      */
-    public constructor(comm: Communicator | null) {
+    public constructor(comm: Communicator | null, outputChannel: vscode.OutputChannel | null = null) {
         super()
+        this.outputChannel = outputChannel
         this._comm = comm
         if (comm != null) {
             this._ownsComm = false
@@ -117,6 +119,26 @@ export class DebugSession extends DebugSessionBase {
         this._comm.on<'end'>(Events.end, () => {
             this.sendEvent(new TerminatedEvent())
         })
+    }
+
+    public sendRequest(command: string, args: any, timeout: number, cb: (response: DebugProtocol.Response) => void): void {
+        this.outputChannel?.appendLine(`sendRequest ${command} ${JSON.stringify(args)}`)
+        super.sendRequest(command, args, timeout, cb)
+    }
+
+    public sendEvent(event: DebugProtocol.Event): void {
+        this.outputChannel?.appendLine(`sendEvent ${event.event} ${JSON.stringify(event.body)}`)
+        super.sendEvent(event)
+    }
+
+    public sendErrorResponse(response: DebugProtocol.Response, codeOrMessage: number | DebugProtocol.Message, format?: string | undefined, variables?: any, dest?: ErrorDestination | undefined): void {
+        this.outputChannel?.appendLine(`sendErrorResponse ${response.command} ${codeOrMessage}`)
+        super.sendErrorResponse(response, codeOrMessage, format, variables, dest)
+    }
+
+    public sendResponse(response: DebugProtocol.Response): void {
+        this.outputChannel?.appendLine(`sendResponse ${response.command} ${JSON.stringify(response.body)}`)
+        super.sendResponse(response)
     }
 
     /**
@@ -207,10 +229,14 @@ export class DebugSession extends DebugSessionBase {
             const state = await this._comm.state({ seq: response.request_seq })
             this.singlePauseMode = state.singlePauseMode
             this.processPushedBreakpoints(state.breakpoints)
+            if (state.paused) {
+                this.sendEvent(new StoppedEvent('entry'))
+            }
         }
     }
 
     private processPushedBreakpoints(breakpoints: Breakpoint[]) {
+        this.outputChannel?.appendLine("Processing pushed breakpoints")
         for (const bp of breakpoints) {
             this.sendEvent(new BreakpointEvent('new', this.convertDebuggerBreakpointToClient(bp)))
         }
@@ -303,8 +329,8 @@ export class DebugSession extends DebugSessionBase {
         //setTimeout(()=>this.processPushedBreakpoints(breakpointsFromSource), 500)
     }
 
-    convertDebuggerBreakpointToClient(bp: Breakpoint): DebugProtocol.Breakpoint {
-        let result: DebugProtocol.Breakpoint = { verified: bp.verified }
+    convertDebuggerBreakpointToClient<T extends Breakpoint | DebugProtocol.BreakpointLocation>(bp: T): typeof bp {
+        let result: any = { verified: 'verified' in bp ? bp.verified : undefined }
         if (bp.line)
             result.line = this.convertDebuggerLineToClient(bp.line)
         if (bp.column)
@@ -313,9 +339,19 @@ export class DebugSession extends DebugSessionBase {
             result.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
         if (bp.endLine)
             result.endLine = this.convertDebuggerLineToClient(bp.endLine)
-        if (bp.path)
+        if ('path' in bp && bp.path)
             result.source = this.pathToSource(bp.path)
-        return bp
+        return result
+    }
+
+    protected convertClientBreakpointToDebugger(bp: DebugProtocol.SourceBreakpoint): DebugProtocol.SourceBreakpoint {
+        return {
+            line: this.convertClientLineToDebugger(bp.line),
+            column: typeof bp.column != 'undefined' ? this.convertClientColumnToDebugger(bp.column) : undefined,
+            condition: bp.condition,
+            hitCondition: bp.hitCondition,
+            logMessage: bp.logMessage
+        }
     }
 
     protected async setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): Promise<void> {
@@ -338,21 +374,11 @@ export class DebugSession extends DebugSessionBase {
         } else {
             const path = this.sourceToPath(args.source)
 
-            // clear all breakpoints for this file
-            this._comm.clearBreakpoints({ path, seq: response.request_seq })
-
-            // set and verify breakpoint locations
-            const actualBreakpoints0 = (args.breakpoints || []).map(async l => {
-                let bp = await this._comm!.addBreakpoint({
-                    path, line: this.convertClientLineToDebugger(l.line), column: this.convertClientColumnToDebugger(l.column ?? 0), seq: response.request_seq
-                })
-                return this.convertDebuggerBreakpointToClient(bp)
-            })
-            const actualBreakpoints = await Promise.all<DebugProtocol.Breakpoint>(actualBreakpoints0)
+            const breakpoints = await this._comm.setBreakpoints({ path, breakpoints: args.breakpoints?.map(bp => this.convertClientBreakpointToDebugger(bp)), seq: response.request_seq })
 
             // send back the actual breakpoint positions
             response.body = {
-                breakpoints: actualBreakpoints
+                breakpoints: breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
             }
         }
         this.sendResponse(response)
@@ -381,16 +407,7 @@ export class DebugSession extends DebugSessionBase {
             delete (<any>newArgs).source
             const bps = await this._comm.possibleBreakpoints(newArgs)
             response.body = {
-                breakpoints: bps.map(bp => {
-                    bp.line = this.convertDebuggerLineToClient(bp.line)
-                    if (bp.column)
-                        bp.column = this.convertDebuggerColumnToClient(bp.column)
-                    if (bp.endLine)
-                        bp.endLine = this.convertDebuggerLineToClient(bp.endLine)
-                    if (bp.endColumn)
-                        bp.endColumn = this.convertDebuggerColumnToClient(bp.endColumn)
-                    return bp
-                })
+                breakpoints: bps.map(bp => this.convertDebuggerBreakpointToClient(bp))
             }
         }
         this.sendResponse(response)
@@ -533,7 +550,7 @@ export class DebugSession extends DebugSessionBase {
             response.success = false
             response.message = DebugSession.connectionNotOpen
         } else {
-            await this._comm.continue(response.request_seq)
+            await this._comm.continue({ ...args, seq: response.request_seq })
         }
         this.sendResponse(response)
     }
