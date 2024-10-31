@@ -1,0 +1,11 @@
+[define]
+"process.env.NODE_DEBUG" = "'https'"
+"process.browser" = "true"
+"process.platform" = "'browser'"
+"process.throwDeprecation" = "true"
+"process.traceDeprecation" = "true"
+"process.noDeprecation" = "false"
+"process.pid" = "0"
+"process.stderr" = "undefined"
+"process.emitWarning" = "undefined"
+"process" = "undefined"

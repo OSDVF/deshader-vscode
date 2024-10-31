@@ -312,7 +312,7 @@ String.prototype.splitNoOrphans = function (separator: string | RegExp, limit?: 
 }
 
 export class WSCommunicator extends Communicator {
-    ws!: WebSocket
+    ws?: WebSocket
     pendingRequests: MapLike<{
         promise: Promise<any> | null,
         name?: string,
@@ -338,9 +338,14 @@ export class WSCommunicator extends Communicator {
         }
         this.ws = new WebSocket(this.uri.toString())
         this.ws.onopen = () => {
-            this.output.appendLine('WebSocket connection established')
-            this.emit(Events.connected)
-            this._resolveConnected()
+            this.output.appendLine('WebSocket connection opened')
+            const check = setInterval(() => {// workaround for readyState is not update immediately (browser bug?)
+                if (this.ws?.readyState == WebSocket.OPEN) {
+                    this.emit(Events.connected)
+                    this._resolveConnected()
+                }
+                clearInterval(check)
+            }, 300)
         }
         this.ws.addEventListener('message', (event) => {
             const responseLines: string[] = splitStringToNParts(event.data, '\n', 3)//0: status, 1: echoed command / seq, 2: body
@@ -369,8 +374,7 @@ export class WSCommunicator extends Communicator {
                         }
                     }
                 }
-                if (!found)
-                    this.output.appendLine("Could not process: " + event.data)
+                if (!found) { this.output.appendLine("Could not process: " + event.data) }
             }
         })
         this.ws.addEventListener('error', (event) => {
@@ -386,7 +390,7 @@ export class WSCommunicator extends Communicator {
     }
 
     async ensureConnected() {
-        switch (this.ws.readyState) {
+        switch (this.ws?.readyState ?? WebSocket.CLOSED) {
             case WebSocket.CLOSED:
                 this.open()
                 await this.connected
@@ -426,7 +430,8 @@ export class WSCommunicator extends Communicator {
 
     async send(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView, seq?: number): Promise<string> {
         const id = seq ?? command
-        if (typeof this.pendingRequests[id] === 'undefined') {
+        const didntExist = typeof this.pendingRequests[id] === 'undefined'
+        if (didntExist) {
             const p = new Promise<string>((_resolve, _reject) => {
                 const t = setTimeout(() => {
                     _reject(new Error('Request timed out'))
@@ -449,8 +454,8 @@ export class WSCommunicator extends Communicator {
                 }
             })
             this.pendingRequests[id].promise = p
-            if (this.ws.readyState == WebSocket.CONNECTING) await this.connected
-            this.ws.send(new Blob([command, ...body ? [body] : []]))
+            if ((this.ws?.readyState ?? WebSocket.CONNECTING) == WebSocket.CONNECTING) { await this.connected }
+            this.ws!.send(new Blob([command, ...body ? [body] : []]))
             this.output.appendLine(`${command}\n${body ?? ""}`)
             return await p
         } else {
@@ -460,7 +465,11 @@ export class WSCommunicator extends Communicator {
     }
 
     disconnect() {
-        this.ws.close()
+        this.ws?.close()
+        this.connected = new Promise((resolve, reject) => {
+            this._resolveConnected = resolve
+            this._rejectConnected = reject
+        })
     }
 }
 

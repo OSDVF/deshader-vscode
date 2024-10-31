@@ -9,3 +9,9 @@ This extension "deshader-vscode" companions Deshader on its way to debug your sh
 ## Requirements
 
 Deshader library must be linked to your executable program.
+
+## Building
+```bash
+bun install
+bun compile-dev
+```

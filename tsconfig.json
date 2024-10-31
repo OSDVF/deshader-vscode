@@ -19,11 +19,13 @@
 		"paths": {
 			"conditional-debug-session": [
 				"./src/debug/session-base.ts"
+			],
+			"process": [
+				"./node-modules/process/browser.js"
 			]
 		},
 	},
 	"exclude": [
 		"node_modules",
-		"proposed.ts"
 	],
 }
