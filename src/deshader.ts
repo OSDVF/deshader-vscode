@@ -71,7 +71,7 @@ export type LaunchArguments = {
     /** Automatically stop target after launch. If not specified, target does not stop. */
     stopOnEntry?: boolean
     showDebugOutput?: boolean
-    args: string[]
+    args?: string[]
     cwd?: string
     env?: { [key: string]: string }
     console?: 'debugConsole' | 'integratedTerminal' | 'externalTerminal'

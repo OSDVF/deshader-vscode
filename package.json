@@ -2,10 +2,11 @@
   "name": "deshader-vscode",
   "displayName": "Deshader",
   "description": "Debug GLSL shaders. Write GLSL code with smart features.",
+  "icon": "deshader.png",
   "publisher": "osdvf",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.82.0",
+    "vscode": "^1.91.1",
     "bun": "^1.0.0"
   },
   "categories": [
@@ -36,7 +37,8 @@
     "onSearch:deshader",
     "onCommand:deshader.getProgramName"
   ],
-  "browser": "./dist/web/extension.js",
+  "browser": "./dist/extension.js",
+  "main": "./dist/extension.js",
   "extensionKind": [
     "ui"
   ],
@@ -320,11 +322,11 @@
     }
   },
   "scripts": {
-    "test": "vscode-test-web --extensionDevelopmentPath=. --extensionTestsPath=dist/web/test/suite/index.js",
+    "test": "vscode-test-web --extensionDevelopmentPath=. --extensionTestsPath=dist/test/suite/index.js",
     "pretest": "bun run compile-dev",
     "vscode:prepublish": "bun run compile-prod",
-    "compile-dev": "bun build src/web/extension.ts --outdir dist/web --sourcemap=linked --external vscode --format cjs --target browser --drop=process",
-    "compile-prod": "bun build src/web/extension.ts --outdir dist/web --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\"",
+    "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process",
+    "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\"",
     "dev": "bun run compile-dev --watch",
     "lint": "eslint .",
     "lintfix": "eslint . --fix",
@@ -344,7 +346,6 @@
     "@typescript-eslint/eslint-plugin": "^8.12.2",
     "@typescript-eslint/parser": "^8.12.2",
     "@vscode/test-web": "^0.0.46",
-    "assert": "^2.1.0",
     "eslint": "^9.13.0",
     "mocha": "^10.2.0",
     "process": "^0.11.10",

@@ -2,12 +2,12 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import { ProviderResult } from 'vscode';
-import { DebugSession } from '../debug/session';
-import { DeshaderFilesystem } from '../filesystem';
-import { Communicator, Config, RunningShader } from '../deshader';
-import { State } from '../state';
-import { deshaderTerminal } from '../terminal';
-import { deshaderLanguageClient } from '../language';
+import { DebugSession } from './debug/session';
+import { DeshaderFilesystem } from './filesystem';
+import { Communicator, Config, RunningShader } from './deshader';
+import { State } from './state';
+import { deshaderTerminal } from './terminal';
+import { deshaderLanguageClient } from './language';
 
 export function activate(context: vscode.ExtensionContext) {
 	let state: State | null = null;

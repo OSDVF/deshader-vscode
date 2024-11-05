@@ -12,7 +12,6 @@ import { Subject } from 'await-notify';
 import * as vscode from 'vscode';
 import { DebugSessionBase } from 'conditional-debug-session';
 import { basename } from 'path-browserify';
-const assert = process.env.NODE_DEBUG ? require('assert') : undefined;
 
 interface ILaunchRequestArguments extends DebugProtocol.LaunchRequestArguments, LaunchArguments { }
 
@@ -72,7 +71,9 @@ export class DebugSession extends DebugSessionBase {
     }
 
     setupEvents() {
-        assert?.(this._comm != null);
+        if (this._comm === null) {
+            throw new Error("Communicator not set up");
+        }
         // setup event handlers
         this._comm.onJson<'stop'>(Events.stop, params => {
             if (params.step == 0) {

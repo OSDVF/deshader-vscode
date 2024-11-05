@@ -1,0 +1,12 @@
+.gitignore
+LICENSE.txt
+bun.lockb
+bunfig.toml
+eslint.config.mjs
+global.d.ts
+tsconfig.json
+.vscode/
+src/
+node_modules/
+dist/test/
+dist/extension.js.map
