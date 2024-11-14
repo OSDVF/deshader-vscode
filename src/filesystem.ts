@@ -96,13 +96,15 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 				};
 			}
 			const target = this.vscodeVirtual[id];
-			return {
-				type: vscode.FileType.File,
-				permissions: vscode.FilePermission.Readonly,
-				ctime: Date.now(),
-				mtime: Date.now(),
-				size: target.length
-			};
+			if(target) {
+				return {
+					type: vscode.FileType.File,
+					permissions: vscode.FilePermission.Readonly,
+					ctime: Date.now(),
+					mtime: Date.now(),
+					size: target.length
+				};
+			}
 		}
 		try {
 			this.comm.ensureConnected();
@@ -115,7 +117,6 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 				throw DeshaderFilesystem.throwDeshaderError(e, uri);
 			} else {throw e;}
 		}
-
 	}
 
 	static convertList(list: string[]): [string, vscode.FileType][] {
@@ -164,7 +165,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 			}
 		} catch (e) {
 			if (typeof e === 'string') {
-				DeshaderFilesystem.throwDeshaderError(e, uri);
+				throw DeshaderFilesystem.throwDeshaderError(e, uri);
 			} else {throw e;}
 		}
 		return DeshaderFilesystem.convertList(list);
@@ -183,10 +184,9 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 			return new TextEncoder().encode(await this.comm.readFile({ path: uri.path }));
 		} catch (e) {
 			if (typeof e === 'string') {
-				DeshaderFilesystem.throwDeshaderError(e, uri);
+				throw DeshaderFilesystem.throwDeshaderError(e, uri);
 			} else {throw e;}
 		}
-		throw vscode.FileSystemError.FileNotFound();
 	}
 
 	writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): void {
