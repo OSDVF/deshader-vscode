@@ -1,6 +1,6 @@
 import { BaseLanguageClient, LanguageClientOptions, MessageTransports, AbstractMessageReader, AbstractMessageWriter, DataCallback, Disposable } from 'vscode-languageclient';
 
-export function deshaderLanguageClient(endpoint: string): WebsocketLanguageClient {
+export function deshaderLanguageClient(endpoint: string | URL): WebsocketLanguageClient {
     const lsp_ws = new WebSocket(endpoint);
     const client = new WebsocketLanguageClient("deshader-glsl-analyzer", "GLSL Analyzer", {
         documentSelector: [{ scheme: 'deshader', language: 'glsl' }, { scheme: 'file', language: 'glsl' }],
@@ -19,7 +19,7 @@ export function deshaderLanguageClient(endpoint: string): WebsocketLanguageClien
  */
 interface WebSocketContainer {
 	ws: WebSocket
-	endpoint: string
+	endpoint: string | URL
 }
 
 class WebsocketLanguageClient extends BaseLanguageClient {

@@ -1,10 +1,8 @@
 export { }
 
 declare global {
-  var deshader: {
-    [protocol: string]: {
-      host: string,
-      port: number
-    },
+  const deshader: {
+    lsp?: string,
+    commands?: string,
   } | undefined
 }

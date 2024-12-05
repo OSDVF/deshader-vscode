@@ -10,8 +10,9 @@ import { deshaderTerminal } from './terminal';
 import { deshaderLanguageClient } from './language';
 
 export function activate(context: vscode.ExtensionContext) {
+	const defaultCommandsUrl = "ws://localhost:8082";
 	let state: State | null = null;
-	let lspPort: number | null = null;
+	let lspUrl: URL | null = null;
 
 	async function notConnectedMessage() {
 		if (await vscode.window.showErrorMessage("Deshader not connected", { modal: true }, "Connect")) {
@@ -107,8 +108,8 @@ export function activate(context: vscode.ExtensionContext) {
 			if (state == null) {
 				await vscode.commands.executeCommand('deshader.connect');
 			}
-			if (state != null && lspPort) {
-				suggest = state.comm.getHost() + lspPort;
+			if (lspUrl) {
+				suggest = lspUrl.toString();
 			}
 			const opts: vscode.InputBoxOptions & vscode.QuickPickOptions = {
 				title: "Remote langugage server", prompt: "Enter server URI", placeHolder: "ws://localhost:8083", canPickMany: false, validateInput(value) {
@@ -126,7 +127,12 @@ export function activate(context: vscode.ExtensionContext) {
 			};
 			const endpoint = await (suggest ? vscode.window.showQuickPick([suggest!], opts) : vscode.window.showInputBox(opts));
 			if (typeof endpoint !== 'undefined') {
-				const cl = deshaderLanguageClient(endpoint);
+				lspUrl = URL.parse(endpoint);
+				if(!lspUrl) {
+					vscode.window.showErrorMessage("Invalid URI");
+					return;
+				}
+				const cl = deshaderLanguageClient(lspUrl);
 				if (state) {
 					state.languageClient = cl;
 				}
@@ -233,7 +239,7 @@ export function activate(context: vscode.ExtensionContext) {
 				comm,
 				fs: vscode.workspace.registerFileSystemProvider('deshader', new DeshaderFilesystem(output, comm), { isCaseSensitive: true, isReadonly: false }),
 				debug: vscode.debug.registerDebugAdapterDescriptorFactory('deshader', new InlineDebugAdapterFactory(comm, output)),
-				languageClient: lspPort == null ? null : deshaderLanguageClient(`ws://${comm.getHost()}:${lspPort}/`,)
+				languageClient: lspUrl == null ? null : deshaderLanguageClient(lspUrl)
 			};
 			context.subscriptions.push(state.fs, state.comm, state.debug);
 			if (state.languageClient) {context.subscriptions.push(state.languageClient);}
@@ -248,10 +254,10 @@ export function activate(context: vscode.ExtensionContext) {
 			if (commState.debugging) {
 				vscode.debug.startDebugging(undefined, "Deshader Integrated");
 			}
-			lspPort = commState.lsp || null;
+			lspUrl = commState.lsp ? URL.parse(commState.lsp) : null;
 
 		} catch (e) {
-			if ('message' in (e as Error))
+			if (typeof e == 'object' && 'message' in (e as Error))
 				{output.appendLine((e as Error).message);}
 			else
 				{output.appendLine(JSON.stringify(e));}
@@ -262,17 +268,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Automatically connect if running inside deshader-integrated vscode
 	if (typeof deshader !== 'undefined') {
-		let protocol: Config['protocol'] = 'http';
-		if (typeof deshader.wss !== 'undefined') {
-			protocol = 'wss';
-		} else if (typeof deshader.https !== 'undefined') {
-			protocol = 'https';
-		} else if (typeof deshader.ws !== 'undefined') {
-			protocol = 'ws';
-		}
-
-		lspPort = deshader.lsp.port;
-		deshaderConnect(undefined, { protocol, ...deshader[protocol] });
+		lspUrl = deshader.lsp ? URL.parse(deshader.lsp) : null;
+		deshaderConnect(deshader.commands || defaultCommandsUrl);
 	}
 }
 

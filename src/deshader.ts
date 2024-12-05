@@ -57,7 +57,7 @@ export type State = {
     runningShaders: RunningShader[],
     paused: boolean,
     singlePauseMode: boolean,
-    lsp?: number,//port number
+    lsp?: string,//URL
 }
 export type Config = { protocol: "ws" | "wss" | "http" | "https", host: string, port: number }
 export type AttachArguments = {
