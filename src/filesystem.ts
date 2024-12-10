@@ -1,6 +1,6 @@
 import * as path from 'path-browserify';
 import * as vscode from 'vscode';
-import { Communicator, Config } from './deshader';
+import { Communicator } from './deshader';
 
 export class File implements vscode.FileStat {
 
@@ -43,6 +43,9 @@ export class Directory implements vscode.FileStat {
 
 export type Entry = File | Directory;
 
+/**
+ * Deshader virtual filesystem provider (scheme: 'deshader')
+ */
 export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	static scheme = 'deshader';
 	root = new Directory('');
@@ -50,32 +53,27 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	comm: Communicator;
 
 	private vscodeVirtual: {
-		[key: string]: string
+		[key: string]: string | undefined
 	} = {};
 
-	constructor(output: vscode.OutputChannel, comm: Communicator, connection?: Config) {
-		output.appendLine(`Mounting filesystem with communicator ${comm.uri.toString()}`);
+	constructor(output: vscode.OutputChannel, comm: Communicator, connection?: string) {
 		this.output = output;
 		this.comm = comm;
-		this.vscodeVirtual = {
-			"launch.json": JSON.stringify({
+		this.vscodeVirtual = {// TODO write to a "defaults" file
+			"launch.json": (typeof deshader != 'undefined' && (comm.isConnected || deshader.commands)) ? JSON.stringify({
 				configurations: [
 					{
 						name: "Deshader Integrated",
 						type: "deshader",
 						request: "attach",
-						connection: connection ?? {
-							protocol: "ws",
-							host: "localhost",
-							port: 8081
-						},
+						connection: connection,
 						stopOnEntry: true
 					}
 				]
-			}),
+			}) : undefined,
 			"settings.json": JSON.stringify({}),
 			"extensions.json": JSON.stringify({
-				recommendations: ["osdvf.deshader-vscode", "filippofracascia.glsl-language-support"]
+				recommendations: ["osdvf.deshader", "filippofracascia.glsl-language-support"]
 			})
 		};
 	}
@@ -107,10 +105,13 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 			}
 		}
 		try {
-			this.comm.ensureConnected();
+			if (this.comm.isConnected) {
 			const result = await this.comm.stat({ path: uri.path });
 			this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`);
 			return result;
+			} else {
+				throw vscode.FileSystemError.Unavailable("Not connected to Deshader");
+			}
 		}
 		catch (e) {
 			if (typeof e === 'string') {

@@ -1,5 +1,6 @@
 {
-  "name": "deshader-vscode",
+  "$schema": "https://json.schemastore.org/package",
+  "name": "deshader",
   "displayName": "Deshader",
   "description": "Debug GLSL shaders. Write GLSL code with smart features.",
   "icon": "deshader.png",
@@ -34,13 +35,13 @@
   "activationEvents": [
     "onDebug",
     "onFileSystem:deshader",
-    "onSearch:deshader",
-    "onCommand:deshader.getProgramName"
+    "onSearch:deshader"
   ],
   "browser": "./dist/extension.js",
   "main": "./dist/extension.js",
   "extensionKind": [
-    "ui"
+    "ui",
+    "workspace"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -66,7 +67,7 @@
         ],
         "configurationAttributes": {
           "launch": {
-            "description": "Inject Deshader into a program and launch it",
+            "description": "Launch a program and inject Deshader Library into it",
             "required": [
               "program"
             ],
@@ -106,34 +107,15 @@
                 "default": "integratedTerminal",
                 "description": "Console used for communication between user and the debugged program"
               },
+              "consoleHost": {
+                "type": "string",
+                "description": "Host for the external terminal",
+                "default": "xterm"
+              },
               "connection": {
-                "host": {
-                  "type": "string",
-                  "description": "Host to run at",
-                  "default": "localhost"
-                },
-                "port": {
-                  "type": "number",
-                  "description": "Port at which Deshader command listener is listening",
-                  "default": 8081
-                },
-                "protocol": {
-                  "type": "string",
-                  "enum": [
-                    "http",
-                    "https",
-                    "ws",
-                    "wss"
-                  ],
-                  "enumDescriptions": [
-                    "Use HTTP",
-                    "Use HTTPS",
-                    "Use WebSocket",
-                    "Use Secure WebSocket"
-                  ],
-                  "default": "http",
-                  "description": "Protocol used to connect to the command listener"
-                }
+                "type": "string",
+                "description": "URL of the Deshader Library commands server (wil be set automatically)",
+                "default": "ws://localhost:8082"
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -152,48 +134,9 @@
             "required": [],
             "properties": {
               "connection": {
-                "host": {
-                  "type": "string",
-                  "description": "Host to run at",
-                  "default": "localhost"
-                },
-                "port": {
-                  "type": "number",
-                  "description": "Port at which Deshader command listener is listening",
-                  "default": 8082
-                },
-                "protocol": {
-                  "type": "string",
-                  "enum": [
-                    "http",
-                    "https",
-                    "ws",
-                    "wss"
-                  ],
-                  "enumDescriptions": [
-                    "Use HTTP",
-                    "Use HTTPS",
-                    "Use WebSocket",
-                    "Use Secure WebSocket"
-                  ],
-                  "default": "ws",
-                  "description": "Protocol used to connect to the command listener"
-                }
-              },
-              "console": {
                 "type": "string",
-                "enum": [
-                  "debugConsole",
-                  "integratedTerminal",
-                  "externalTerminal"
-                ],
-                "enumDescriptions": [
-                  "Use the built-in debug console",
-                  "Use the built-in integrated terminal (default)",
-                  "Use the external terminal (not available in integrated Deshader Editor)"
-                ],
-                "default": "integratedTerminal",
-                "description": "Console used for communication between user and the debugged program"
+                "description": "URL of the Deshader Library commands server",
+                "default": "ws://localhost:8082"
               },
               "showDebugOutput": {
                 "type": "boolean",
@@ -225,12 +168,7 @@
             "name": "Deshader Attach",
             "type": "deshader",
             "request": "attach",
-            "connection": {
-              "host": "localhost",
-              "port": 8082,
-              "protocol": "ws"
-            },
-            "console": "integratedTerminal",
+            "connection": "ws://localhost:8082",
             "showDebugOutput": false,
             "stopOnEntry": false
           }
@@ -238,7 +176,7 @@
         "configurationSnippets": [
           {
             "label": "Deshader Launch",
-            "description": "Launch a program with Deshader injected",
+            "description": "Launch a program and inject Deshader Library into it",
             "body": {
               "type": "deshader",
               "request": "launch",
@@ -254,14 +192,12 @@
           },
           {
             "label": "Deshader Attach",
-            "description": "Attach to a running program with Deshader injected",
+            "description": "Attach to a running program with Deshader already injected",
             "body": {
               "type": "deshader",
               "request": "attach",
               "name": "Deshader Attach",
-              "protocol": "http",
-              "host": "127.0.0.1",
-              "port": 8081,
+              "connection": "ws://localhost:8082",
               "showDebugOutput": false,
               "stopOnEntry": false
             }
@@ -274,34 +210,66 @@
     ],
     "commands": [
       {
-        "command": "deshader.newTerminal",
-        "title": "Deshader: New Terminal"
-      },
-      {
         "command": "deshader.connect",
-        "title": "Deshader: Connect"
-      },
-      {
-        "command": "deshader.connectLsp",
-        "title": "Deshader: Connect/Start GLSL language server"
-      },
-      {
-        "command": "deshader.pauseMode",
-        "title": "Deshader: Select thread pause mode"
+        "title": "Deshader: Connect",
+        "icon": "$(broadcast)"
       },
       {
         "command": "deshader.disconnect",
-        "title": "Deshader: Disconnect"
+        "title": "Deshader: Disconnect",
+        "icon": "$(debug-disconnect)"
       },
       {
-        "command": "deshader.selectThread",
-        "title": "Deshader: Select shader thread"
+        "command": "deshader.newTerminal",
+        "title": "Deshader: New Terminal",
+        "icon": "$(terminal)"
       },
       {
         "command": "dehsader.openWorkspace",
-        "title": "Deshader: Open connected workspace"
+        "title": "Deshader: Open connected workspace",
+        "icon": "$(file-directory)"
+      },
+      {
+        "command": "deshader.pauseMode",
+        "title": "Deshader: Select thread pause mode",
+        "icon": "$(debug-coverage)"
+      },
+      {
+        "command": "deshader.selectThread",
+        "title": "Deshader: Select shader thread",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "deshader.showInstrumented",
+        "title": "Show instrumented code",
+        "category": "Deshader",
+        "icon": "$(circuit-board)"
       }
     ],
+    "menus": {
+      "editor/title/context": [
+        {
+          "command": "deshader.showInstrumented",
+          "group": "navigation",
+          "when": "resourceLangId == glsl && debugType == deshader"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "deshader.showInstrumented",
+          "group": "navigation",
+          "when": "editorLangId == glsl && debugType == deshader"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "deshader.showInstrumented",
+          "group": "navigation",
+          "when": "resourceLangId == glsl && !explorerResourceIsFolder && debugType == deshader"
+
+        }
+      ]
+    },
     "terminal": {
       "profiles": [
         {
@@ -310,6 +278,41 @@
           "icon": "debug-console"
         }
       ]
+    },
+    "configuration": {
+      "title": "Deshader",
+      "properties": {
+        "deshader.path": {
+          "type": "string",
+          "description": "Path to the Deshader Library (system directories will be searched if empty; no effect in Deshader Editor)",
+          "default": ""
+        },
+        "deshader.launcher": {
+          "type": "string",
+          "description": "Path to the Deshader Launcher (system directories will be searched if empty; no effect in Deshader Editor)",
+          "default": ""
+        },
+        "deshader.defaultConsoleHost": {
+          "type": "string",
+          "markdownDescription": "Default console host for applications launched in `externalTerminal` mode",
+          "default": "xterm"
+        },
+        "deshader.targetAliveCheck": {
+          "type": "number",
+          "description": "Time in milliseconds between checks if the target is still alive (Deshader Editor only)",
+          "default": 1000
+        },
+        "deshader.communicator.retries": {
+          "type": "number",
+          "description": "Number of retries for the communication with the Deshader Library",
+          "default": 3
+        },
+        "deshader.communicator.readyCheck": {
+          "type": "number",
+          "description": "Time in milliseconds between checks if the Deshader Library is ready",
+          "default": 800
+        }
+      }
     },
     "icons": {
       "extension-deshader": {
@@ -322,15 +325,12 @@
     }
   },
   "scripts": {
-    "test": "vscode-test-web --extensionDevelopmentPath=. --extensionTestsPath=dist/test/suite/index.js",
-    "pretest": "bun run compile-dev",
     "vscode:prepublish": "bun run compile-prod",
     "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process",
     "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\"",
     "dev": "bun run compile-dev --watch",
     "lint": "eslint .",
-    "lintfix": "eslint . --fix",
-    "run-in-browser": "vscode-test-web --browserType=chromium --extensionDevelopmentPath=. ."
+    "lintfix": "eslint . --fix"
   },
   "dependencies": {
     "@vscode/debugadapter": "^1.64.0",
@@ -339,15 +339,12 @@
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@types/mocha": "^10.0.2",
     "@types/node": "^20.10.4",
     "@types/path-browserify": "^1.0.3",
     "@types/vscode": "^1.91.1",
     "@typescript-eslint/eslint-plugin": "^8.12.2",
     "@typescript-eslint/parser": "^8.12.2",
-    "@vscode/test-web": "^0.0.46",
     "eslint": "^9.13.0",
-    "mocha": "^10.2.0",
     "process": "^0.11.10",
     "ts-loader": "^9.4.4",
     "typescript": "^5.2.2",

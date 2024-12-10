@@ -59,24 +59,21 @@ export type State = {
     singlePauseMode: boolean,
     lsp?: string,//URL
 }
-export type Config = { protocol: "ws" | "wss" | "http" | "https", host: string, port: number }
 export type AttachArguments = {
-    connection: Config
-    showDebugOutput?: LaunchArguments['showDebugOutput']
-    stopOnEntry?: LaunchArguments['stopOnEntry']
-}
-export type LaunchArguments = {
-    /** An absolute path to the "program" to debug. */
-    program: string
+    connection?: string
     /** Automatically stop target after launch. If not specified, target does not stop. */
     stopOnEntry?: boolean
     showDebugOutput?: boolean
+}
+
+export type LaunchArguments = AttachArguments & {
+    /** An absolute path to the "program" to debug. */
+    program: string
     args?: string[]
     cwd?: string
-    env?: { [key: string]: string }
+    env?: MapLike<string>,
     console?: 'debugConsole' | 'integratedTerminal' | 'externalTerminal'
-    connection?: Config
-    showDevDebugOutput?: boolean
+    consoleHost?: string
 }
 type SourceToPath<T> = Omit<T, "source"> & { path: string }
 export type Breakpoint = SourceToPath<DebugProtocol.Breakpoint>
@@ -95,28 +92,98 @@ export type WithLength<T> = T & { length?: number }
 export type Seq = { seq?: number }
 export type PathRequest = { path: string } & Seq
 export type ListRequest = { path?: string, recursive?: boolean, untagged?: boolean } & Seq
+type MessageCallback = (event: MessageEvent) => void
+
 /**
  * Communicates through WS or HTTP with a running Deshader instance
  * Proxies both the virtual file system and the debugger
  */
-export abstract class Communicator extends EventEmitter implements vscode.Disposable {
-    uri: vscode.Uri
+export class Communicator extends EventEmitter implements vscode.Disposable {
     output: vscode.OutputChannel
-    connected: Promise<void>
-    protected _resolveConnected!: () => void
-    protected _rejectConnected!: () => void
-    abstract ensureConnected(): Promise<void>
+    private endpoint: URL | null = null
+    private impl: CommunicatorImpl | null = null
+    private _onConnected = new Set<VoidFunction>()
+    private _onDisconnected = new Set<VoidFunction>()
+    private _onMessage = new Set<MessageCallback>()
 
-    constructor(uri: vscode.Uri, output: vscode.OutputChannel, open = true) {
+    constructor(output: vscode.OutputChannel, defaultURL?: string | URL | vscode.Uri, open = true) {
         super()
-        this.uri = uri
+        if (defaultURL)
+            this.endpointURL = defaultURL
         this.output = output
-        this.connected = new Promise((resolve, reject) => {
-            this._resolveConnected = resolve
-            this._rejectConnected = reject
-        })
-        if (open) {
+        if (open && defaultURL) {
             this.open()
+        }
+    }
+
+    get endpointURL(): URL | null {
+        return this.endpoint
+    }
+
+    set endpointURL(value: string | URL | vscode.Uri) {
+        if (value instanceof vscode.Uri) {
+            value = value.toString()
+        }
+        if (typeof value === 'string') {
+            const parsed = URL.parse(value)
+            if (parsed) {
+                this.endpoint = parsed
+            } else {
+                throw URIError("Could not parse")
+            }
+        } else {
+            this.endpoint = value
+        }
+
+        this.updateImpl()
+    }
+
+    get onConnected() {
+        if(this.impl)
+            return this.impl.onConnected
+        return this._onConnected
+    }
+    get onDisconnected() {
+        if(this.impl)
+            return this.impl.onDisconnected
+        return this._onDisconnected
+    }
+    get onMessage() {
+        if(this.impl)
+            return this.impl.onMessage
+        return this._onMessage
+    }
+
+    shown = 0
+    private updateImpl() {
+        if (this.impl) {
+            this.impl.dispose()
+            this._onMessage = this.impl.onMessage
+            this._onConnected = this.impl.onConnected
+            this._onDisconnected = this.impl.onDisconnected
+        }
+        if (this.endpoint) {
+            switch (this.endpoint.protocol) {
+                case 'ws:':
+                case 'wss:':
+                    this.impl = new WSCommunicator(this, false)
+                    break
+                default:
+                    throw new Error(`Unimplemented scheme ${this.endpoint!.protocol}`)
+            }
+            this.impl.onConnected = this._onConnected
+            this.impl.onDisconnected = this._onDisconnected
+            this.impl.onMessage = this._onMessage
+            this.impl.open()
+        } else {
+            if (this.shown++ < 3) {
+                vscode.window.showErrorMessage("Connect to a Deshader command server first", "Connect").then((item) => {
+                    if (item) {
+                        vscode.commands.executeCommand("deshader.connect")
+                    }
+                })
+            }
+            throw new Error("No endpoint set")
         }
     }
 
@@ -136,42 +203,52 @@ export abstract class Communicator extends EventEmitter implements vscode.Dispos
         return super.emit(eventName, arg)
     }
 
-    static fromUri(uri: vscode.Uri, output: vscode.OutputChannel, open = true): Communicator {
-        switch (uri.scheme) {
-            case 'ws':
-            case 'wss':
-                return new WSCommunicator(uri, output, open)
-            default:
-                throw new Error(`Unknown scheme ${uri.scheme}`)
-        }
-    }
-
-    static fromConfig(config: Config, output: vscode.OutputChannel, open = true) {
-        switch (config.protocol) {
-            case "ws":
-            case "wss":
-                return new WSCommunicator(vscode.Uri.from({
-                    scheme: config.protocol,
-                    authority: `${config.host}:${config.port}`
-                }), output, open)
-            default:
-                throw new Error(`Unknown protocol ${config.protocol}`)
-        }
-    }
-
     /**
      * Get host name without port
      */
-    getHost(): string {
-        return this.uri.authority.split(':', 2)[0]
+    getHost(): string | undefined {
+        return this.endpoint?.hostname
     }
 
-    abstract disconnect(): void
-    abstract open(): void
+    disconnect(): void {
+        this.impl?.disconnect()
+    }
+    open(): void {
+        if (!this.impl) {
+            this.updateImpl()
+        }
+        this.impl!.open()
+    }
 
-    abstract send(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
-    abstract sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
-    abstract sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T>
+    get isConnected(): boolean {
+        return this.impl?.isConnected || false
+    }
+
+    send(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string> {
+        if (!this.impl) {
+            this.updateImpl()
+        }
+        return this.impl!.sendCommand(command, body)
+    }
+    sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string> {
+        if (!this.impl) {
+            this.updateImpl()
+        }
+        return this.impl!.sendParametric(command, params, body)
+    }
+    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T> {
+        if (!this.impl) {
+            this.updateImpl()
+        }
+        return this.impl!.sendParametricJson(command, params, body)
+    }
+
+    ensureConnected(): Promise<void> {
+        if (!this.impl) {
+            this.updateImpl()
+        }
+        return this.impl!.ensureConnected()
+    }
 
     dispose() {
         this.disconnect()
@@ -191,13 +268,13 @@ export abstract class Communicator extends EventEmitter implements vscode.Dispos
     async readFile(req: PathRequest): Promise<string> {
         return await this.sendParametric('readFile', req)
     }
-
-    async languageServerStart(req: { port?: number } & Seq = {}): Promise<number | null> {
-        return parseInt(await this.sendParametric('languageServerStart', req)) || 0
-    }
-
-    async languageServerStop(seq?: number): Promise<void> {
-        await this.sendParametric('languageServerStop', { seq })
+    /**
+     * Translates a path from the real to virtual file system
+     * @param req An absolute filesystem path
+     * @returns The path in the virtual file system
+     */
+    translatePath(req: PathRequest): Promise<string> {
+        return this.sendParametric('translatePath', req)
     }
 
     //
@@ -311,8 +388,156 @@ String.prototype.splitNoOrphans = function (separator: string | RegExp, limit?: 
     return arr
 }
 
-export class WSCommunicator extends Communicator {
-    ws?: WebSocket
+export interface CommunicatorImpl extends vscode.Disposable {
+    onConnected: Set<VoidFunction>
+    onDisconnected: Set<VoidFunction>
+    onMessage: Set<MessageCallback>
+
+    disconnect(): void
+    open(): Promise<void>
+
+    sendCommand(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
+    sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
+    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T>
+
+    ensureConnected(): Promise<void>
+    get isConnected(): boolean
+}
+
+/**
+ * Handles re-creation of the socet connection when it is closed
+ */
+export class WebSocketContainer implements vscode.Disposable {
+    protected ws: WebSocket | null = null
+    onMessage = new Set<MessageCallback>()
+    onConnected = new Set<VoidFunction>()
+    onDisconnected = new Set<VoidFunction>()
+    protected connected: Promise<void>
+    private _resolveConnected!: () => void
+    private _rejectConnected!: (reason?: any) => void
+    private _endpoint!: URL
+
+    constructor(defaultURL?: string | URL, open: boolean = true) {
+        this.connected = new Promise<void>((resolve, reject) => {
+            this._resolveConnected = resolve
+            this._rejectConnected = reject
+        })
+        if (defaultURL) {
+            this.endpoint = defaultURL
+            if (open) {
+                this.open()
+            }
+        }
+    }
+
+    get endpoint(): URL {
+        return this.endpoint
+    }
+
+    set endpoint(value: URL | string) {
+        const original = this._endpoint
+        if (typeof value === 'string') {
+            const parsed = URL.parse(value)
+            if (parsed) {
+                this._endpoint = parsed
+            } else {
+                throw URIError("Could not parse")
+            }
+        } else {
+            this._endpoint = value
+        }
+        if (this._endpoint != original) {
+            this.open()
+        }
+    }
+
+    close() {
+        this.ws?.close()
+    }
+
+    async open() {
+        const config = vscode.workspace.getConfiguration('deshader.communicator')
+        let remaining = config.get<number>("retries", 3)
+        while (remaining-- > 0) {
+            try {
+                this.ws = new WebSocket(this._endpoint)
+                this.ws.addEventListener('error', ev => {
+                    if(remaining == 0){
+                        this.ws!.onclose = null
+                        this.disconnect(ev)
+                    }
+                    this.connected = new Promise((resolve, reject) => {
+                        this._resolveConnected = resolve
+                        this._rejectConnected = reject
+                    })
+                })
+                this.ws.addEventListener('close', ev => {
+                    this.ws!.onclose = null
+                    this.disconnect(ev)
+                })
+                if (this.ws.readyState == WebSocket.OPEN) {
+                    this.onConnected.forEach(l => l())
+                    this._resolveConnected()
+                } else {
+                    this.ws!.addEventListener('open', () => {
+                        const check = setInterval(() => {// workaround for readyState is not update immediately (browser bug/feature?)
+                            if (this.ws?.readyState == WebSocket.OPEN) {
+                                this.onConnected.forEach(l => l())
+                                this._resolveConnected()
+                            }
+                            clearInterval(check)
+                        }, config.get<number>("readyCheck", 800))
+                    })
+                }
+                await this.connected;
+                break;// success
+            } catch (e) {
+                if (remaining == 0) {
+                    this._rejectConnected(e)
+                }
+            }
+        }
+        this.ws!.addEventListener('message', ev => this.onMessage.forEach(l => l(ev)))
+    }
+
+    async ensureConnected() {
+        switch (this.ws?.readyState ?? WebSocket.CLOSED) {
+            case WebSocket.CLOSED:
+                await this.open()
+                break
+            case WebSocket.CONNECTING:
+                await this.connected
+                break
+        }
+    }
+
+    get isConnected() {
+        return this.ws?.readyState == WebSocket.OPEN
+    }
+
+    disconnect(reason?: any) {
+        this.ws?.close(typeof reason === 'number' ? reason : undefined, typeof reason === 'string' ? reason : undefined)
+        this.ws = null
+        this._rejectConnected(reason)
+        this.connected = new Promise((resolve, reject) => {
+            this._resolveConnected = resolve
+            this._rejectConnected = reject
+        })
+        this.onDisconnected.forEach(l => l())
+    }
+
+    dispose() {
+        this.disconnect()
+    }
+
+    async send(data: string | Blob | ArrayBufferLike | ArrayBufferView): Promise<void> {
+        await this.ensureConnected()
+        this.ws?.send(data)
+    }
+}
+
+export class WSCommunicator extends WebSocketContainer implements CommunicatorImpl {
+    comm: Communicator
     pendingRequests: MapLike<{
         promise: Promise<any> | null,
         name?: string,
@@ -320,50 +545,35 @@ export class WSCommunicator extends Communicator {
         reject: (response: string) => void
     }> = {};
 
-    constructor(uri: vscode.Uri, output: vscode.OutputChannel, open = true) {
-        super(uri, output, open)
+    constructor(comm: Communicator, open = true) {
+        super(comm.endpointURL || undefined, open)
+        this.comm = comm
     }
 
-    open() {
-        if (this.ws) {// connected previously
-            if (this.ws.readyState == WebSocket.OPEN) {
-                this._resolveConnected()
-                return
-            }
+    close() {
+        this.ws?.close()
+    }
 
-            this.connected = new Promise((resolve, reject) => {
-                this._resolveConnected = resolve
-                this._rejectConnected = reject
-            })
-        }
-        this.ws = new WebSocket(this.uri.toString())
-        this.ws.onopen = () => {
-            this.output.appendLine('WebSocket connection opened')
-            const check = setInterval(() => {// workaround for readyState is not update immediately (browser bug?)
-                if (this.ws?.readyState == WebSocket.OPEN) {
-                    this.emit(Events.connected)
-                    this._resolveConnected()
-                }
-                clearInterval(check)
-            }, 300)
-        }
-        this.ws.addEventListener('message', (event) => {
+    async open() {
+        await super.open()
+        this.connected.then(() => this.comm.emit(Events.connected))
+        this.ws!.addEventListener('message', (event) => {
             const responseLines: string[] = splitStringToNParts(event.data, '\n', 3)//0: status, 1: echoed command / seq, 2: body
             if (responseLines[0].startsWith('600')) {// event (pushed by Deshader library)
-                this.emit(Events[responseLines[1]], responseLines[2])
-                this.output.appendLine(event.data)
+                this.comm.emit(Events[responseLines[1]], responseLines[2])
+                this.comm.output.appendLine(event.data)
             }
             else {
                 let found = false
                 for (let [command, actions] of Object.entries(this.pendingRequests)) {
                     if (responseLines.length > 1 && responseLines[1] == command) {
-                        this.output.appendLine(responseLines[0])
-                        this.output.appendLine(actions.name ?? responseLines[1])
-                        this.output.appendLine(responseLines[2])
+                        this.comm.output.appendLine(responseLines[0])
+                        this.comm.output.appendLine(actions.name ?? responseLines[1])
+                        this.comm.output.appendLine(responseLines[2])
                         found = true
 
                         const resp = responseLines[2]
-                        this.emit(Events.message, resp)
+                        this.comm.emit(Events.message, resp)
                         if (responseLines[0].startsWith('202')) {// success
                             actions.resolve(new Blob([resp]))
                         }
@@ -374,31 +584,17 @@ export class WSCommunicator extends Communicator {
                         }
                     }
                 }
-                if (!found) { this.output.appendLine("Could not process: " + event.data) }
+                if (!found) { this.comm.output.appendLine("Could not process: " + event.data) }
             }
         })
-        this.ws.addEventListener('error', (event) => {
-            this.output.appendLine("WebSocket connection has been closed by an error")
-            this.emit(Events.error, event)
-            this._rejectConnected()
+        this.ws!.addEventListener('error', (event) => {
+            this.comm.output.appendLine("WebSocket connection has been closed by an error")
+            this.comm.emit(Events.error, event)
         })
-        this.ws.addEventListener('close', (event) => {
-            this.output.appendLine("WebSocket connection has been closed " + (event.wasClean ? "clean" : "unclean") + " with reason (" + event.code + "): " + event.reason)
-            this.emit(Events.close, event)
-            this._rejectConnected()
+        this.ws!.addEventListener('close', (event) => {
+            this.comm.output.appendLine("WebSocket connection has been closed " + (event.wasClean ? "clean" : "unclean") + " with reason (" + event.code + "): " + event.reason)
+            this.comm.emit(Events.close, event)
         })
-    }
-
-    async ensureConnected() {
-        switch (this.ws?.readyState ?? WebSocket.CLOSED) {
-            case WebSocket.CLOSED:
-                this.open()
-                await this.connected
-                break
-            case WebSocket.CONNECTING:
-                await this.connected
-                break
-        }
     }
 
     sendParametricJson<T>(command: string, params?: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T> {
@@ -425,10 +621,21 @@ export class WSCommunicator extends Communicator {
                 }
             }
         }
-        return this.send(command, body, seq)
+        return this.sendCommand(command, body, seq)
     }
 
-    async send(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView, seq?: number): Promise<string> {
+    shown = 0
+    async sendCommand(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView, seq?: number): Promise<string> {
+        if (!this.isConnected) {
+            if (this.shown++ < 3) {
+                const item = await vscode.window.showErrorMessage("Deshader command server is not connected", "Connect")
+                if (item) {
+                    vscode.commands.executeCommand("deshader.connect")
+                }
+
+            }
+            throw new Error("Not connected to Deshader command server")
+        }
         const id = seq ?? command
         const didntExist = typeof this.pendingRequests[id] === 'undefined'
         if (didntExist) {
@@ -456,20 +663,12 @@ export class WSCommunicator extends Communicator {
             this.pendingRequests[id].promise = p
             if ((this.ws?.readyState ?? WebSocket.CONNECTING) == WebSocket.CONNECTING) { await this.connected }
             this.ws!.send(new Blob([command, ...body ? [body] : []]))
-            this.output.appendLine(`${command}\n${body ?? ""}`)
+            this.comm.output.appendLine(`${command}\n${body ?? ""}`)
             return await p
         } else {
-            this.output.appendLine(`Duplicate send request ${seq ?? ""} ${command} ${body ?? ""}`)
+            this.comm.output.appendLine(`Duplicate send request ${seq ?? ""} ${command} ${body ?? ""}`)
             return await this.pendingRequests[id].promise
         }
-    }
-
-    disconnect() {
-        this.ws?.close()
-        this.connected = new Promise((resolve, reject) => {
-            this._resolveConnected = resolve
-            this._rejectConnected = reject
-        })
     }
 }
 
