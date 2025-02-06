@@ -23,6 +23,9 @@
 				"./node-modules/process/browser.js"
 			]
 		},
+		"types": [
+			"./vscode.proposed.resolvers.d.ts"
+		]
 	},
 	"exclude": [
 		"node_modules",

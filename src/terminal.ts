@@ -6,6 +6,8 @@ const extensionCommands = [
 	"connectLsp"
 ]
 
+export const PROFILE = "deshader.terminal"
+
 let nextTerminalId = 1
 // cleanup inconsitent line breaks
 const formatText = (text: string) => `\r${text.split(/(\r?\n)/g).join("\r")}\r`
@@ -56,7 +58,7 @@ export function deshaderTerminal(comm: Communicator): vscode.ExtensionTerminalOp
 								// run the command
 								const response = await comm.send(input)
 								writeEmitter.fire(`\r${formatText(response)}`)
-								if(input == 'help') {
+								if (input == 'help') {
 									writeEmitter.fire(`\r${formatText("Extension commands:\n" + extensionCommands.join("\n"))}\n`)
 								}
 							}

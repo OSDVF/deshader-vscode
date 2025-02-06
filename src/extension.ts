@@ -4,22 +4,32 @@ import * as vscode from 'vscode'
 import { ProviderResult } from 'vscode'
 import { DebugSession, deshaderSessions } from './debug/session'
 import { DeshaderFilesystem } from './filesystem'
-import { Communicator, RunningShader, WebSocketContainer } from './deshader'
-import { deshaderTerminal } from './terminal'
+import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, RunningShader, WebSocketContainer } from './deshader'
+import { deshaderTerminal, PROFILE } from './terminal'
 import { deshaderLanguageClient } from './language'
 import { unknownToString } from './format'
 import { ConfigurationProvider } from './debug/config'
 import { browseFile } from './RPC'
+import Commands from './commands'
+import { DeshaderRemoteResolver } from './remote'
 
+const DEFAULT_CONNECTION = 'ws://127.0.0.1:8082'
+
+const SUPPORTS_REMOTE = 'registerRemoteAuthorityResolver' in vscode.workspace
 export function activate(context: vscode.ExtensionContext) {
 	const output = vscode.window.createOutputChannel('Deshader')
-	context.subscriptions.push(output)
 	const comm = new Communicator(output)
+	const fs = new DeshaderFilesystem(output, comm)
+	for (const s of DeshaderSchemes)
+		context.subscriptions.push(vscode.workspace.registerFileSystemProvider(s, fs, { isCaseSensitive: true, isReadonly: false }))
+	context.subscriptions.push(output)
 	context.subscriptions.push(comm)
-	const fs = vscode.workspace.registerFileSystemProvider('deshader', new DeshaderFilesystem(output, comm), { isCaseSensitive: true, isReadonly: false })
-	context.subscriptions.push(fs)
-	const debug = vscode.debug.registerDebugAdapterDescriptorFactory('deshader', new InlineDebugAdapterFactory(comm, output))
-	context.subscriptions.push(debug)
+	if (SUPPORTS_REMOTE) {
+		const resolver = new DeshaderRemoteResolver()
+		context.subscriptions.push(vscode.workspace.registerRemoteAuthorityResolver(DeshaderSchemes[0], resolver))
+	}
+	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
+
 	const lspContainer = new WebSocketContainer()
 	context.subscriptions.push(lspContainer)
 	const languageClient = deshaderLanguageClient(lspContainer)
@@ -32,9 +42,9 @@ export function activate(context: vscode.ExtensionContext) {
 	const threadStatusItem = vscode.window.createStatusBarItem('selectedThread', vscode.StatusBarAlignment.Left, 900)
 	threadStatusItem.name = 'Shader Thread'
 	threadStatusItem.tooltip = 'Select different shader thread'
-	threadStatusItem.command = 'deshader.selectThread'
+	threadStatusItem.command = Commands.selectThread
 	async function updateStatus(session?: vscode.DebugSession) {
-		if (typeof session !== 'undefined' && session.type == 'deshader') {
+		if (typeof session !== 'undefined' && session.type == DebugSession.TYPE) {
 			modeStatusItem.text = await session.customRequest('getPauseMode') ? '$(run)' : '$(run-all)'
 			modeStatusItem.show()
 			threadStatusItem.show()
@@ -44,25 +54,28 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	}
 	const modeStatusItem = vscode.window.createStatusBarItem('pauseMode', vscode.StatusBarAlignment.Left, 850)
-	modeStatusItem.command = 'deshader.pauseMode'
+	modeStatusItem.command = Commands.pauseMode
 	modeStatusItem.name = 'Shader Pause Mode'
 	modeStatusItem.tooltip = 'Select shader pause granularity mode'
 
 	const connectionStatusItem = vscode.window.createStatusBarItem('deshader', vscode.StatusBarAlignment.Left, 1000)
 	connectionStatusItem.name = 'Deshader'
 	function initialStatusItemState() {
+		vscode.commands.executeCommand('setContext', 'deshader.connected', false)
+
 		connectionStatusItem.text = '$(plug) Deshader'
-		connectionStatusItem.command = 'deshader.connect'
+		connectionStatusItem.command = Commands.connect
 		connectionStatusItem.tooltip = 'Click to connect to Deshader'
 		connectionStatusItem.show()
 	}
 	initialStatusItemState()
 	comm.onConnected.add(async () => {
+		vscode.commands.executeCommand('setContext', 'deshader.connected', true)
 		const u = comm.endpointURL
 		if (u) {
 			connectionStatusItem.text = "$(extension-deshader) " + u.host
 			connectionStatusItem.tooltip = `Deshader connected (${u.protocol.substring(0, u.protocol.length - 1)}). Click to disconnect.`
-			connectionStatusItem.command = 'deshader.disconnect'
+			connectionStatusItem.command = Commands.disconnect
 
 			// check if we are already debugging on the Deshader side
 			const commState = await comm.state({})
@@ -73,61 +86,82 @@ export function activate(context: vscode.ExtensionContext) {
 	})
 
 	comm.onDisconnected.add(initialStatusItemState)
+	comm.onDisconnected.add(() => {
+		for (const s of deshaderSessions) {
+			vscode.debug.stopDebugging(s)// TODO find the correct session
+		}
+		for (const w of vscode.workspace.workspaceFolders || []) {
+			if (DeshaderSchemesAndRaw.includes(w.uri.scheme as DeshaderScheme)) {
+				vscode.workspace.updateWorkspaceFolders(w.index, 1)
+			}
+		}
+	})
 
 	let warnAlreadyConnected = true
 
 	// Register disposables
 	context.subscriptions.push(
 		connectionStatusItem,
-		vscode.commands.registerCommand('deshader.askForProgramName', () => vscode.window.showInputBox({
+		vscode.commands.registerCommand(Commands.askForProgramName, () => vscode.window.showInputBox({
 			placeHolder: 'Please enter the path of an executable file relative to the workspace root',
 			value: 'a.out'
 		})),
-		vscode.commands.registerCommand('deshader.browseFile', () => typeof deshader !== 'undefined' ? browseFile() : vscode.window.showOpenDialog({
+		vscode.commands.registerCommand(Commands.browseFile, () => typeof deshader !== 'undefined' ? browseFile() : vscode.window.showOpenDialog({
 			title: 'Select Executable Program'
 		}).then(uris => uris?.[0].fsPath)),
-		vscode.commands.registerCommand('deshader.connect', async () => {
+		vscode.commands.registerCommand(Commands.connect, async (args) => {
+			const input: string | undefined = typeof args === 'string' ? args : undefined
 			if (comm.isConnected && warnAlreadyConnected) {
 				const response = await vscode.window.showWarningMessage('Deshader is already connected. Do you want to reconnect?', 'Yes', 'No', 'Never ask again')
 				if (response === 'No') {
-					return
+					return comm.endpointURL
 				}
 				if (response === 'Never ask again') {
 					warnAlreadyConnected = false
 				}
 			}
 
-			const response = await vscode.window.showInputBox({
+			const response = input ? input : await vscode.window.showInputBox({
 				placeHolder: 'Please enter the connection string',
-				value: 'ws://127.0.0.1:8082'
+				value: DEFAULT_CONNECTION
 			})
 			if (response) {
 				try {
 					await deshaderConnect(response)
+					return comm.endpointURL
 				} catch (e) {
 					vscode.window.showErrorMessage(`Failed to connect to Deshader (${comm.endpointURL}): ${unknownToString(e)}`)
 				}
-			} else {
-				vscode.window.showErrorMessage('No connection string provided')
 			}
+			return null
 		}),
-		vscode.commands.registerCommand('deshader.disconnect', () => {
+		vscode.commands.registerCommand(Commands.disconnect, () => {
 			if (comm.isConnected) {
 				comm.disconnect()
 			}
 			initialStatusItemState()
 		}),
-		vscode.commands.registerCommand('deshader.newTerminal', async () => {
+		vscode.commands.registerCommand(Commands.newTerminal, async () => {
 			await comm.ensureConnected()
 			if (comm.isConnected) { vscode.window.createTerminal(deshaderTerminal(comm)).show() }
 		}),
-		vscode.commands.registerCommand('deshader.openWorkspace', async () => {
-			await vscode.commands.executeCommand('deshader.connect')
-			comm.ensureConnected()
-			vscode.commands.executeCommand('vscode.openFolder', { uri: vscode.Uri.from({ scheme: DeshaderFilesystem.scheme, path: "/" }), forceReuseWindow: true })
+		vscode.commands.registerCommand(Commands.openWorkspace, async () => {
+			if (comm.connectionState == ConnectionState.Disconnected) {
+				await vscode.commands.executeCommand(Commands.connect)
+				if (comm.connectionState == ConnectionState.Disconnected) {
+					throw new Error('Not connected')
+				}
+			}
+			for (const f of vscode.workspace.workspaceFolders || []) {
+				if (f.uri.scheme === comm.scheme && f.uri.authority === comm.endpointURL?.host) {
+					vscode.window.showInformationMessage('Shader workspace already open')
+					return
+				}
+			}
+			return vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length || 0, 0, { uri: vscode.Uri.from({ scheme: comm.scheme!, authority: comm.endpointURL?.host, path: "/" }) })
 		}),
-		vscode.commands.registerCommand('deshader.connectLsp', async () => {
-			await vscode.commands.executeCommand('deshader.connect')
+		vscode.commands.registerCommand(Commands.connectLsp, async () => {
+			await vscode.commands.executeCommand(Commands.connect)
 			const opts: vscode.InputBoxOptions & vscode.QuickPickOptions = {
 				title: "Remote langugage server", prompt: "Enter server URI", placeHolder: "ws://127.0.0.1:8083", canPickMany: false, validateInput(value) {
 					try {
@@ -151,7 +185,7 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		}),
-		vscode.commands.registerCommand('deshader.selectThread', async () => {
+		vscode.commands.registerCommand(Commands.selectThread, async () => {
 			const sess = vscode.debug.activeDebugSession
 			if (sess?.type === 'deshader') {
 				const current = await sess?.customRequest('getCurrentShader') as RunningShader
@@ -189,15 +223,15 @@ export function activate(context: vscode.ExtensionContext) {
 				await notDebuggingMessage()
 			}
 		}),
-		vscode.commands.registerCommand('deshader.showInstrumented', async () => {
+		vscode.commands.registerCommand(Commands.showInstrumented, async () => {
 			const sess = vscode.debug.activeDebugSession
-			if (sess?.type === 'deshader') {
+			if (sess?.type === DebugSession.TYPE) {
 				const e = vscode.window.activeTextEditor
 				if (e && !e.document.uri.path.endsWith('.instrumented')) {
 					const u = e.document.uri
-					const deshaderPath = u.scheme === DeshaderFilesystem.scheme ? u.path : await comm.translatePath({ path: u.path })
+					const deshaderPath = DeshaderSchemesAndRaw.includes(u.scheme as DeshaderScheme) ? u.path : await comm.translatePath({ path: u.path })
 					vscode.workspace.openTextDocument(u.with({
-						scheme: DeshaderFilesystem.scheme,
+						scheme: u.scheme,
 						path: deshaderPath + '.instrumented'
 					}))
 				} else {
@@ -207,9 +241,9 @@ export function activate(context: vscode.ExtensionContext) {
 				await notDebuggingMessage()
 			}
 		}),
-		vscode.commands.registerCommand('deshader.pauseMode', async () => {
+		vscode.commands.registerCommand(Commands.pauseMode, async () => {
 			const sess = vscode.debug.activeDebugSession
-			if (sess?.type === 'deshader') {
+			if (sess?.type === DebugSession.TYPE) {
 				const picked = await vscode.window.showQuickPick(["Single", "All"], { canPickMany: false })
 				if (typeof picked !== 'undefined') {
 					const single = picked == "Single"
@@ -220,8 +254,8 @@ export function activate(context: vscode.ExtensionContext) {
 				await notDebuggingMessage()
 			}
 		}),
-		vscode.window.registerTerminalProfileProvider('deshader.terminal', {
-			async provideTerminalProfile(token: vscode.CancellationToken): Promise<vscode.TerminalProfile> {
+		vscode.window.registerTerminalProfileProvider(PROFILE, {
+			async provideTerminalProfile(): Promise<vscode.TerminalProfile> {
 				await comm.ensureConnected()
 				return new vscode.TerminalProfile(deshaderTerminal(comm))
 			}
@@ -229,17 +263,17 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.debug.onDidStartDebugSession(updateStatus),
 		vscode.debug.onDidChangeActiveDebugSession(updateStatus),
 		vscode.debug.onDidTerminateDebugSession((e) => {
-			if (e.type == 'deshader') {
+			if (e.type == DebugSession.TYPE) {
 				modeStatusItem.hide()
 				threadStatusItem.hide()
 			}
 		}),
-		vscode.debug.registerDebugConfigurationProvider('deshader', new ConfigurationProvider())
+		vscode.debug.registerDebugConfigurationProvider(DebugSession.TYPE, new ConfigurationProvider())
 	)
 	// Update the current shader ref when the active debug session selected thread changes
 	if (typeof vscode.debug.onDidChangeActiveStackItem !== 'undefined') {
 		context.subscriptions.push(vscode.debug.onDidChangeActiveStackItem(async (e) => {
-			if (typeof e !== 'undefined' && e.session.type === 'deshader') {
+			if (typeof e !== 'undefined' && e.session.type === DebugSession.TYPE) {
 				e.session.customRequest('updateStackItem', e)
 				threadStatusItem.show()
 				const currentShader = await e.session.customRequest('getCurrentShader') as RunningShader
@@ -263,6 +297,10 @@ export function activate(context: vscode.ExtensionContext) {
 			if (lspURL) {
 				lspContainer.endpoint = lspURL
 			}
+			const config = vscode.workspace.getConfiguration('deshader')
+			if (config.get<boolean>('openAfterConnect', true)) {
+				vscode.commands.executeCommand(Commands.openWorkspace)
+			}
 		} catch (e) {
 			output.appendLine(unknownToString(e))
 			throw e
@@ -271,6 +309,17 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Automatically connect if running inside deshader-integrated vscode
 	if (typeof deshader !== 'undefined') {
+		if (!deshader.commands) {
+			// suggest default connection :)
+			const ws = new WebSocket(DEFAULT_CONNECTION)
+			ws.onopen = async () => {
+				ws.close()
+				const response = await vscode.window.showInformationMessage('Deshader detected at the default connection (' + DEFAULT_CONNECTION + ')', 'Connect')
+				if (response) {
+					deshaderConnect(DEFAULT_CONNECTION)
+				}
+			}
+		}
 		deshaderConnect(deshader.commands, deshader.lsp)
 	}
 }

@@ -1,64 +1,66 @@
-import * as path from 'path-browserify';
-import * as vscode from 'vscode';
-import { Communicator } from './deshader';
+import * as path from 'path-browserify'
+import * as vscode from 'vscode'
+import { Communicator, ConnectionState, DeshaderScheme, isTagged } from './deshader'
+
+const VFS_GUIDE = "https://github.com/OSDVF/deshader/blob/main/guide/Filesystem.md"
 
 export class File implements vscode.FileStat {
 
-	type: vscode.FileType;
-	ctime: number;
-	mtime: number;
-	size: number;
+	type: vscode.FileType
+	ctime: number
+	mtime: number
+	size: number
 
-	name: string;
-	data?: Uint8Array;
+	name: string
+	data?: Uint8Array
 
 	constructor(name: string) {
-		this.type = vscode.FileType.File;
-		this.ctime = Date.now();
-		this.mtime = Date.now();
-		this.size = 0;
-		this.name = name;
+		this.type = vscode.FileType.File
+		this.ctime = Date.now()
+		this.mtime = Date.now()
+		this.size = 0
+		this.name = name
 	}
 }
 
 export class Directory implements vscode.FileStat {
 
-	type: vscode.FileType;
-	ctime: number;
-	mtime: number;
-	size: number;
+	type: vscode.FileType
+	ctime: number
+	mtime: number
+	size: number
 
-	name: string;
-	entries: Map<string, File | Directory>;
+	name: string
+	entries: Map<string, File | Directory>
 
 	constructor(name: string) {
-		this.type = vscode.FileType.Directory;
-		this.ctime = Date.now();
-		this.mtime = Date.now();
-		this.size = 0;
-		this.name = name;
-		this.entries = new Map();
+		this.type = vscode.FileType.Directory
+		this.ctime = Date.now()
+		this.mtime = Date.now()
+		this.size = 0
+		this.name = name
+		this.entries = new Map()
 	}
 }
 
-export type Entry = File | Directory;
+export type Entry = File | Directory
+type ErrorFunction = (e: unknown) => void
 
 /**
- * Deshader virtual filesystem provider (scheme: 'deshader')
+ * Deshader virtual filesystem provider (scheme: 'deshader[ws]')
  */
 export class DeshaderFilesystem implements vscode.FileSystemProvider {
-	static scheme = 'deshader';
 	root = new Directory('');
-	output: vscode.OutputChannel;
-	comm: Communicator;
+	output: vscode.OutputChannel
+	comm: Communicator
 
 	private vscodeVirtual: {
 		[key: string]: string | undefined
 	} = {};
 
 	constructor(output: vscode.OutputChannel, comm: Communicator, connection?: string) {
-		this.output = output;
-		this.comm = comm;
+		this.output = output
+		this.comm = comm
 		this.vscodeVirtual = {// TODO write to a "defaults" file
 			"launch.json": (typeof deshader != 'undefined' && (comm.isConnected || deshader.commands)) ? JSON.stringify({
 				configurations: [
@@ -75,269 +77,291 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 			"extensions.json": JSON.stringify({
 				recommendations: ["osdvf.deshader", "filippofracascia.glsl-language-support"]
 			})
-		};
+		}
 	}
 
-	// --- manage file metadata
+	private showingError = false
+	private lastCheck: Promise<void> | null = null
+	// Still suffers from "time-of-check to time-of-use" errors, but it's at least something
+	async checkConnection() {
+		switch (this.comm.connectionState) {
+			// @ts-expect-error 
+			case ConnectionState.Connecting:
+				await this.comm.ensureConnected()
+			// fallthrough
+			case ConnectionState.Connected:
+				return
+			case ConnectionState.Disconnected:
+				if (this.showingError) {
+					throw vscode.FileSystemError.Unavailable("Not connected to Deshader")
+				}
+				this.showingError = true
+				const hasEndpoint = this.comm.endpointURL != null
+				try {
+					const value = await vscode.window.showErrorMessage(`Not connected to Deshader` + (hasEndpoint ? `. Connect to ${this.comm.endpointURL}?` : ''), "Connect")
+					if (value) {
+						let resolve: VoidFunction | null = null
+						let reject: ErrorFunction | null = null
+						let waitFor = Promise.resolve()
+						if (this.lastCheck) {
+							waitFor = this.lastCheck
+						}
+						this.lastCheck = new Promise<void>((res, rej) => {
+							resolve = res
+							reject = rej
+						})
+						await waitFor
+						try {
+							if (hasEndpoint) {
+								await this.comm.ensureConnected()
+								if (resolve != null) (resolve as VoidFunction)()
+							} else {
+								await vscode.commands.executeCommand("deshader.connect")
+								await this.comm.ensureConnected()
+								if (resolve) (resolve as VoidFunction)()
+							}
+						} catch (e) {
+							if (reject) (reject as ErrorFunction)(e)
+						}
+					} else {
+						throw vscode.FileSystemError.Unavailable("Not connected to Deshader")
+					}
+					this.showingError = false
+					return
+				} catch (e) {
+					this.showingError = false
+					throw e
+				}
+		}
+	}
 
 	async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
-		const codeRoot = uri.path.indexOf("/.vscode");
+		await this.checkConnection()
+
+		const codeRoot = uri.path.indexOf("/.vscode")
 		if (codeRoot != -1) {
-			const id = uri.path.substring(codeRoot + 9);
-			if(!id) {
+			const id = uri.path.substring(codeRoot + 9)
+			if (!id) {
 				return {
-					type:vscode.FileType.Directory,
+					type: vscode.FileType.Directory,
 					permissions: vscode.FilePermission.Readonly,
 					ctime: Date.now(),
 					mtime: Date.now(),
 					size: 0
-				};
+				}
 			}
-			const target = this.vscodeVirtual[id];
-			if(target) {
+			const target = this.vscodeVirtual[id]
+			if (target) {
 				return {
 					type: vscode.FileType.File,
 					permissions: vscode.FilePermission.Readonly,
 					ctime: Date.now(),
 					mtime: Date.now(),
 					size: target.length
-				};
+				}
 			}
 		}
 		try {
-			if (this.comm.isConnected) {
-			const result = await this.comm.stat({ path: uri.path });
-			this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`);
-			return result;
-			} else {
-				throw vscode.FileSystemError.Unavailable("Not connected to Deshader");
-			}
+			const result = await this.comm.stat({ path: uri.path })
+			this.output.appendLine(`Stat ${uri.path} result: ${JSON.stringify(result)}`)
+			return result
 		}
 		catch (e) {
 			if (typeof e === 'string') {
-				throw DeshaderFilesystem.throwDeshaderError(e, uri);
-			} else {throw e;}
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
 		}
 	}
 
 	static convertList(list: string[]): [string, vscode.FileType][] {
-		const result: [string, vscode.FileType][] = [];
+		const result: [string, vscode.FileType][] = []
 
 		for (const f of list) {
-			let maybeLink = vscode.FileType.Unknown;//0
-			const linkParts = f.split('>');
+			let maybeLink = vscode.FileType.Unknown//0
+			const linkParts = f.split('>')
 			if (linkParts.length > 1) {
-				maybeLink = vscode.FileType.SymbolicLink;
+				maybeLink = vscode.FileType.SymbolicLink
 			}
 			if (linkParts[0].endsWith('/')) {
-				result.push([linkParts[0], vscode.FileType.Directory | maybeLink]);
+				result.push([linkParts[0], vscode.FileType.Directory | maybeLink])
 			} else {
-				result.push([linkParts[0], vscode.FileType.File | maybeLink]);
+				result.push([linkParts[0], vscode.FileType.File | maybeLink])
 			}
 		}
-		return result;
+		return result
 	}
 
-	static throwDeshaderError(e: string, uri: vscode.Uri): string | vscode.FileSystemError {
+	static throwDeshaderError(e: string, uri: vscode.Uri): vscode.FileSystemError {
 		switch (e) {
 			case 'DirectoryNotFound':
 			case 'TargetNotFound':
 			case 'NotTagged':
-				return vscode.FileSystemError.FileNotFound(uri);
+				return vscode.FileSystemError.FileNotFound(uri)
 			case 'TagExists':
+				return vscode.FileSystemError.FileExists(uri)
 			case 'DirExists':
-				return vscode.FileSystemError.FileExists(uri);
-			default: return e;
+				return vscode.FileSystemError.FileIsADirectory(uri)
+			case 'Protected':
+				return vscode.FileSystemError.NoPermissions(uri)
+			case 'ContextMismatch':
+				return vscode.FileSystemError.NoPermissions("Shaders cannot be moved across contexts")
+			case 'TypeMismatch':
+				return vscode.FileSystemError.NoPermissions("Programs and shaders have isolated filesystems")
+			case 'InvalidPath':
+				return vscode.FileSystemError.FileNotFound(`The path ${uri} is not eligible for this operation`)
+			default: return new vscode.FileSystemError(`Error \`${e}\` while manipulating ${uri}`)
 		}
 	}
 
 	async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
-		const codeRoot = uri.path.indexOf("/.vscode");
-		if(codeRoot != -1) {
-			return DeshaderFilesystem.convertList(Object.keys(this.vscodeVirtual));
+		await this.checkConnection()
+
+		const codeRoot = uri.path.indexOf("/.vscode")
+		if (codeRoot != -1) {
+			return DeshaderFilesystem.convertList(Object.keys(this.vscodeVirtual))
 		}
-		
-		let list: string[] = [];
+
+		let list: string[] = []
 		try {
-			this.comm.ensureConnected();
-			list = await this.comm.list({ path: uri.path.endsWith("/") ? uri.path : uri.path + "/" });
-			if(uri.path === "/") {
-				list.push(".vscode/");
+			list = await this.comm.list({ path: uri.path.endsWith("/") ? uri.path : uri.path + "/" })
+			if (uri.path === "/") {
+				list.push(".vscode/")
 			}
 		} catch (e) {
 			if (typeof e === 'string') {
-				throw DeshaderFilesystem.throwDeshaderError(e, uri);
-			} else {throw e;}
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
 		}
-		return DeshaderFilesystem.convertList(list);
+		return DeshaderFilesystem.convertList(list)
 	}
 
 	// --- manage file contents
 
 	async readFile(uri: vscode.Uri): Promise<Uint8Array> {
-		this.output.appendLine(`Reading ${uri.toString()}`);
-		const codeRoot = uri.path.indexOf("/.vscode");
+		await this.checkConnection()
+
+		const codeRoot = uri.path.indexOf("/.vscode")
 		if (codeRoot != -1) {
-			return new TextEncoder().encode(this.vscodeVirtual[uri.path.substring(codeRoot + 9)]);
+			return new TextEncoder().encode(this.vscodeVirtual[uri.path.substring(codeRoot + 9)])
 		}
 		try {
-			this.comm.ensureConnected();
-			return new TextEncoder().encode(await this.comm.readFile({ path: uri.path }));
+			return new Uint8Array(await (await this.comm.readFile({ path: uri.path })).arrayBuffer())
 		} catch (e) {
 			if (typeof e === 'string') {
-				throw DeshaderFilesystem.throwDeshaderError(e, uri);
-			} else {throw e;}
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
 		}
 	}
 
-	writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): void {
-		this.output.appendLine(`Writing ${uri.toString()}`);
-		const basename = path.basename(uri.path);
-		const parent = this._lookupParentDirectory(uri);
-		let entry = parent.entries.get(basename);
-		if (entry instanceof Directory) {
-			throw vscode.FileSystemError.FileIsADirectory(uri);
-		}
-		if (!entry && !options.create) {
-			throw vscode.FileSystemError.FileNotFound(uri);
-		}
-		if (entry && options.create && !options.overwrite) {
-			throw vscode.FileSystemError.FileExists(uri);
-		}
-		if (!entry) {
-			entry = new File(basename);
-			parent.entries.set(basename, entry);
-			this._fireSoon({ type: vscode.FileChangeType.Created, uri });
-		}
-		entry.mtime = Date.now();
-		entry.size = content.byteLength;
-		entry.data = content;
+	async writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): Promise<void> {
+		await this.checkConnection()
 
-		this._fireSoon({ type: vscode.FileChangeType.Changed, uri });
+		if (options.create) {
+			throw vscode.FileSystemError.Unavailable("Shaders need to be created in the host application")
+		}
+
+		try {
+			await this.comm.save({
+				path: uri.path,
+				compile: true,
+				link: true
+			}, content)
+			this._fireSoon({ type: vscode.FileChangeType.Changed, uri })
+		} catch (e) {
+			if (typeof e === 'string') {
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
+		}
 	}
 
 	// --- manage files/folders
 
-	rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean }): void {
-		this.output.appendLine(`Renaming ${oldUri.toString()} to ${newUri.toString()}`);
-		if (!options.overwrite && this._lookup(newUri, true)) {
-			throw vscode.FileSystemError.FileExists(newUri);
+	async rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean }): Promise<void> {
+		if (!isTagged(newUri.path)) {
+			throw vscode.FileSystemError.NoPermissions("Cannot rename to a non-tagged path. See " + VFS_GUIDE)
+		}
+		await this.checkConnection()
+
+		try {
+			await this.comm.rename({ from: oldUri.path, to: newUri.path })
+
+			this._fireSoon(
+				{ type: vscode.FileChangeType.Deleted, uri: oldUri },
+				{ type: vscode.FileChangeType.Created, uri: newUri }
+			)
+		} catch (e) {
+			if (typeof e === 'string') {
+				throw DeshaderFilesystem.throwDeshaderError(e, oldUri)
+			} else { throw e }
+		}
+	}
+
+	async delete(uri: vscode.Uri): Promise<void> {
+		if (!isTagged(uri.path)) {
+			throw vscode.FileSystemError.NoPermissions("Only tags can be deleted. Not real shaders or programs.")
+		}
+		await this.checkConnection()
+		try {
+			await this.comm.untag({
+				path: uri.path
+			})
+		} catch (e) {
+			if (typeof e === 'string') {
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
+		}
+		const dirname = uri.with({
+			path: path.dirname(uri.path)
+		})
+
+		this._fireSoon({ type: vscode.FileChangeType.Changed, uri: dirname }, { uri, type: vscode.FileChangeType.Deleted })
+	}
+
+	async createDirectory(uri: vscode.Uri): Promise<void> {
+		if (!isTagged(uri.path)) {
+			throw vscode.FileSystemError.NoPermissions("Cannot make directory in a non-tagged path. See " + VFS_GUIDE)
+		}
+		await this.checkConnection()
+		try {
+			await this.comm.mkdir({
+				path: uri.path
+			})
+		}
+		catch (e) {
+			if (typeof e === 'string') {
+				throw DeshaderFilesystem.throwDeshaderError(e, uri)
+			} else { throw e }
 		}
 
-		const entry = this._lookup(oldUri, false);
-		const oldParent = this._lookupParentDirectory(oldUri);
-
-		const newParent = this._lookupParentDirectory(newUri);
-		const newName = path.basename(newUri.path);
-
-		oldParent.entries.delete(entry.name);
-		entry.name = newName;
-		newParent.entries.set(newName, entry);
-
-		this._fireSoon(
-			{ type: vscode.FileChangeType.Deleted, uri: oldUri },
-			{ type: vscode.FileChangeType.Created, uri: newUri }
-		);
-	}
-
-	delete(uri: vscode.Uri): void {
-		this.output.appendLine(`Deleting ${uri.toString()}`);
-		const dirname = uri.with({ path: path.dirname(uri.path) });
-		const basename = path.basename(uri.path);
-		const parent = this._lookupAsDirectory(dirname, false);
-		if (!parent.entries.has(basename)) {
-			throw vscode.FileSystemError.FileNotFound(uri);
-		}
-		parent.entries.delete(basename);
-		parent.mtime = Date.now();
-		parent.size -= 1;
-		this._fireSoon({ type: vscode.FileChangeType.Changed, uri: dirname }, { uri, type: vscode.FileChangeType.Deleted });
-	}
-
-	createDirectory(uri: vscode.Uri): void {
-		this.output.appendLine(`Creating directory ${uri.toString()}`);
-		const basename = path.basename(uri.path);
-		const dirname = uri.with({ path: path.dirname(uri.path) });
-		const parent = this._lookupAsDirectory(dirname, false);
-
-		const entry = new Directory(basename);
-		parent.entries.set(entry.name, entry);
-		parent.mtime = Date.now();
-		parent.size += 1;
-		this._fireSoon({ type: vscode.FileChangeType.Changed, uri: dirname }, { type: vscode.FileChangeType.Created, uri });
-	}
-
-	// --- lookup
-
-	private _lookup(uri: vscode.Uri, silent: false): Entry;
-	private _lookup(uri: vscode.Uri, silent: boolean): Entry | undefined;
-	private _lookup(uri: vscode.Uri, silent: boolean): Entry | undefined {
-		const parts = uri.path.split('/');
-		let entry: Entry = this.root;
-		for (const part of parts) {
-			if (!part) {
-				continue;
-			}
-			let child: Entry | undefined;
-			if (entry instanceof Directory) {
-				child = entry.entries.get(part);
-			}
-			if (!child) {
-				if (!silent) {
-					throw vscode.FileSystemError.FileNotFound(uri);
-				} else {
-					return undefined;
-				}
-			}
-			entry = child;
-		}
-		return entry;
-	}
-
-	private _lookupAsDirectory(uri: vscode.Uri, silent: boolean): Directory {
-		const entry = this._lookup(uri, silent);
-		if (entry instanceof Directory) {
-			return entry;
-		}
-		throw vscode.FileSystemError.FileNotADirectory(uri);
-	}
-
-	private _lookupAsFile(uri: vscode.Uri, silent: boolean): File {
-		const entry = this._lookup(uri, silent);
-		if (entry instanceof File) {
-			return entry;
-		}
-		throw vscode.FileSystemError.FileIsADirectory(uri);
-	}
-
-	private _lookupParentDirectory(uri: vscode.Uri): Directory {
-		const dirname = uri.with({ path: path.dirname(uri.path) });
-		return this._lookupAsDirectory(dirname, false);
+		this._fireSoon({ type: vscode.FileChangeType.Changed, uri: uri.with({ path: path.dirname(uri.path) }) }, { type: vscode.FileChangeType.Created, uri })
 	}
 
 	// --- manage file events
 
 	private _emitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
 	private _bufferedEvents: vscode.FileChangeEvent[] = [];
-	private _fireSoonHandle?: NodeJS.Timeout;
+	private _fireSoonHandle?: NodeJS.Timeout
 
 	readonly onDidChangeFile: vscode.Event<vscode.FileChangeEvent[]> = this._emitter.event;
 
 	watch(_resource: vscode.Uri): vscode.Disposable {
 		// ignore, fires for all changes...
-		return new vscode.Disposable(() => { });
+		return new vscode.Disposable(() => { })
 	}
 
+	/**
+	 * Debounce event
+	 */
 	private _fireSoon(...events: vscode.FileChangeEvent[]): void {
-		this._bufferedEvents.push(...events);
+		this._bufferedEvents.push(...events)
 
 		if (this._fireSoonHandle) {
-			clearTimeout(this._fireSoonHandle);
+			clearTimeout(this._fireSoonHandle)
 		}
 
 		this._fireSoonHandle = setTimeout(() => {
-			this._emitter.fire(this._bufferedEvents);
-			this._bufferedEvents.length = 0;
-		}, 5);
+			this._emitter.fire(this._bufferedEvents)
+			this._bufferedEvents.length = 0
+		}, 5)
 	}
 }

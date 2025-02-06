@@ -7,7 +7,7 @@ import {
     ProgressStartEvent, ProgressUpdateEvent, ProgressEndEvent, InvalidatedEvent,
     Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination
 } from '@vscode/debugadapter'
-import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent } from '../deshader'
+import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent, DeshaderScheme } from '../deshader'
 import { Subject } from 'await-notify'
 import * as vscode from 'vscode'
 import { DebugSessionBase } from 'conditional-debug-session'
@@ -43,11 +43,14 @@ vscode.debug.onDidTerminateDebugSession(s => {
     }
 })
 
-
+/**
+ * Deshader debug adapter
+ */
 export class DebugSession extends DebugSessionBase {
     /**
      * Connection string that will be used when no connection is specified
      */
+    static TYPE: 'deshader' = 'deshader'
     public static DEFAULT_CONNECTION = "ws://127.0.0.1:8082";
     public static DEFAULT_LIBRARY_PATH = isWindows ? "deshader.dll" : navigator.userAgent.includes('Mac') ? "libdeshader.dylib" : "libdeshader.so"
     public static DEFAULT_LAUNCHER_PATH = "deshader-run"

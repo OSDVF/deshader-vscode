@@ -35,7 +35,12 @@
   "activationEvents": [
     "onDebug",
     "onFileSystem:deshader",
-    "onSearch:deshader"
+    "onFileSystem:deshaders",
+    "onFileSystem:deshaderws",
+    "onFileSystem:deshaderwss",
+    "onSearch:deshader",
+    "onResolveRemoteAuthority:deshader",
+    "onView:deshader"
   ],
   "browser": "./dist/extension.js",
   "main": "./dist/extension.js",
@@ -212,31 +217,37 @@
       {
         "command": "deshader.connect",
         "title": "Deshader: Connect",
-        "icon": "$(broadcast)"
+        "icon": "$(broadcast)",
+        "category": "Deshader"
       },
       {
         "command": "deshader.disconnect",
         "title": "Deshader: Disconnect",
-        "icon": "$(debug-disconnect)"
+        "icon": "$(debug-disconnect)",
+        "category": "Deshader"
       },
       {
         "command": "deshader.newTerminal",
+        "category": "Deshader",
         "title": "Deshader: New Terminal",
         "icon": "$(terminal)"
       },
       {
-        "command": "dehsader.openWorkspace",
-        "title": "Deshader: Open connected workspace",
+        "command": "deshader.openWorkspace",
+        "title": "Deshader: Open shader workspace",
+        "category": "Deshader",
         "icon": "$(file-directory)"
       },
       {
         "command": "deshader.pauseMode",
         "title": "Deshader: Select thread pause mode",
+        "category": "Deshader",
         "icon": "$(debug-coverage)"
       },
       {
         "command": "deshader.selectThread",
         "title": "Deshader: Select shader thread",
+        "category": "Deshader",
         "icon": "$(list-selection)"
       },
       {
@@ -268,14 +279,71 @@
           "when": "resourceLangId == glsl && !explorerResourceIsFolder && debugType == deshader"
 
         }
+      ],
+      "explorer/title": [
+        {
+          "command": "deshader.openWorkspace",
+          "group": "navigation"
+        }
+      ],
+			"statusBar/remoteIndicator": [
+        {
+          "command": "deshader.connect",
+          "when": "remoteConnectionState == disconnected || !remoteConnectionState",
+          "group": "remote_20_deshader_1general@1"
+        },
+        {
+          "command": "deshader.disconnect",
+          "when": "remoteName =~ /^deshader$/ && remoteConnectionState == connected",
+          "group": "remote_20_deshader_1general@2"
+        }
       ]
     },
+    "resourceLabelFormatters": [
+      {
+          "scheme": "vscode-remote",
+          "authority": "deshader+*",
+          "formatting": {
+              "label": "${path}",
+              "separator": "/",
+              "tildify": true,
+              "stripPathStartingSeparator": true,
+              "workspaceSuffix": "Deshader",
+              "workspaceTooltip": "Deshader virtual shader workspace"
+          }
+      }
+  ],
     "terminal": {
       "profiles": [
         {
           "id": "deshader.terminal",
           "title": "Deshader Terminal",
           "icon": "debug-console"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "explorer",
+        "contents": "In order to use Deshader, connect to a running instance of the Deshader Library.\n[Connect](command:deshader.connect)\nTo learn more about how to use Deshader [read its docs](https://github.com/OSDVF/deshader/blob/main/guide/README.md).",
+        "when": "!deshader.connected"
+      },
+      {
+        "view": "explorer",
+        "contents": "\n[Open shader workspace](command:deshader.openWorkspace)\n",
+        "when": "deshader.connected"
+      },
+      {
+        "view": "deshader",
+        "contents": "\n[Open shader workspace](command:deshader.openWorkspace)\n"
+      }
+    ],
+    "views": {
+      "remote": [
+        {
+          "id": "deshader",
+          "name": "Deshader",
+          "remoteName": "deshader"
         }
       ]
     },
@@ -292,6 +360,11 @@
           "description": "Path to the Deshader Launcher (system directories will be searched if empty; no effect in Deshader Editor)",
           "default": ""
         },
+        "deshader.openAfterConnect": {
+          "type": "boolean",
+          "description": "Open virtual shader workspace after connecting to the Deshader Library",
+          "default": true
+        },
         "deshader.defaultConsoleHost": {
           "type": "string",
           "markdownDescription": "Default console host for applications launched in `externalTerminal` mode",
@@ -306,6 +379,11 @@
           "type": "number",
           "description": "Number of retries for the communication with the Deshader Library",
           "default": 3
+        },
+        "deshader.communicator.trace": {
+          "type": "boolean",
+          "description": "Trace the communication between Deshader Library and the extension",
+          "default": false
         },
         "deshader.communicator.readyCheck": {
           "type": "number",
@@ -329,6 +407,7 @@
     "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process",
     "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\"",
     "dev": "bun run compile-dev --watch",
+    "postinstall": "bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts",
     "lint": "eslint .",
     "lintfix": "eslint . --fix"
   },

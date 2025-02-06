@@ -6,7 +6,15 @@ import { MapLike } from 'typescript'
 import * as vscode from 'vscode'
 import { EventEmitter } from 'events'
 import { DebugProtocol } from '@vscode/debugprotocol'
+import Commands from './commands'
 
+export const DeshaderSchemes = ['deshader', 'deshaders', 'deshaderws', 'deshaderwss'] as const
+export const RawSchemes = ['http', 'https', 'ws', 'wss'] as const
+export type RawScheme = typeof RawSchemes[number]
+export const DeshaderSchemesAndRaw = [...DeshaderSchemes, ...RawSchemes] as const
+export type DeshaderScheme = typeof DeshaderSchemes[number]
+export type DeshaderOrRawScheme = typeof DeshaderSchemesAndRaw[number]
+export enum ConnectionState {Connecting, Connected, Disconnected}
 export const Events = {
     connected: Symbol(),
     message: Symbol(),
@@ -92,6 +100,11 @@ export type WithLength<T> = T & { length?: number }
 export type Seq = { seq?: number }
 export type PathRequest = { path: string } & Seq
 export type ListRequest = { path?: string, recursive?: boolean, untagged?: boolean } & Seq
+export type Body = string | ArrayBufferLike | Blob | ArrayBufferView
+/**
+ * Content should be in reqest body
+ */
+export type SaveRequest = PathRequest & { compile: boolean, link: boolean }
 type MessageCallback = (event: MessageEvent) => void
 
 /**
@@ -101,7 +114,7 @@ type MessageCallback = (event: MessageEvent) => void
 export class Communicator extends EventEmitter implements vscode.Disposable {
     output: vscode.OutputChannel
     private endpoint: URL | null = null
-    private impl: CommunicatorImpl | null = null
+    private impl: ICommunicatorImpl | null = null
     private _onConnected = new Set<VoidFunction>()
     private _onDisconnected = new Set<VoidFunction>()
     private _onMessage = new Set<MessageCallback>()
@@ -116,10 +129,16 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         }
     }
 
+    /**
+     * Always returns a {@link URL} object with {@link RawScheme} as protocol.
+     */
     get endpointURL(): URL | null {
         return this.endpoint
     }
 
+    /**
+     * Accepts {@link RawScheme} or {@link DeshaderScheme} in the form of a {@link string}, {@link URL} or {@link vscode.Uri}.
+     */
     set endpointURL(value: string | URL | vscode.Uri) {
         if (value instanceof vscode.Uri) {
             value = value.toString()
@@ -134,24 +153,28 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         } else {
             this.endpoint = value
         }
+        this.endpoint.protocol = protocolToRaw(this.endpoint.protocol as WithColon<DeshaderOrRawScheme>)
 
         this.updateImpl()
     }
 
     get onConnected() {
-        if(this.impl)
+        if (this.impl)
             return this.impl.onConnected
         return this._onConnected
     }
     get onDisconnected() {
-        if(this.impl)
+        if (this.impl)
             return this.impl.onDisconnected
         return this._onDisconnected
     }
     get onMessage() {
-        if(this.impl)
+        if (this.impl)
             return this.impl.onMessage
         return this._onMessage
+    }
+    get scheme() {
+        return this.impl?.scheme
     }
 
     shown = 0
@@ -163,14 +186,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
             this._onDisconnected = this.impl.onDisconnected
         }
         if (this.endpoint) {
-            switch (this.endpoint.protocol) {
-                case 'ws:':
-                case 'wss:':
-                    this.impl = new WSCommunicator(this, false)
-                    break
-                default:
-                    throw new Error(`Unimplemented scheme ${this.endpoint!.protocol}`)
-            }
+            const impl = protocolToImpl(this.endpoint.protocol as WithColon<RawScheme>)
+            this.impl = new impl(this, false)
             this.impl.onConnected = this._onConnected
             this.impl.onDisconnected = this._onDisconnected
             this.impl.onMessage = this._onMessage
@@ -179,7 +196,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
             if (this.shown++ < 3) {
                 vscode.window.showErrorMessage("Connect to a Deshader command server first", "Connect").then((item) => {
                     if (item) {
-                        vscode.commands.executeCommand("deshader.connect")
+                        vscode.commands.executeCommand(Commands.connect)
                     }
                 })
             }
@@ -224,19 +241,27 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         return this.impl?.isConnected || false
     }
 
-    send(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string> {
+    get isConnecting(): boolean {
+        return this.impl?.isConnecting || false
+    }
+
+    get connectionState(): ConnectionState {
+        return this.impl?.connectionState ?? ConnectionState.Disconnected
+    }
+
+    send<OutputString = true>(command: string, body?: Body, seq?: number, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
         if (!this.impl) {
             this.updateImpl()
         }
-        return this.impl!.sendCommand(command, body)
+        return this.impl!.sendCommand(command, body, seq, outputString) as Promise<OutputString extends false ? Blob : string>
     }
-    sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string> {
+    sendParametric<OutputString = true>(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: Body, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
         if (!this.impl) {
             this.updateImpl()
         }
-        return this.impl!.sendParametric(command, params, body)
+        return this.impl!.sendParametric(command, params, body, outputString) as Promise<OutputString extends false ? Blob : string>
     }
-    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T> {
+    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: Body): Promise<T> {
         if (!this.impl) {
             this.updateImpl()
         }
@@ -265,9 +290,33 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         const sources = await this.sendParametric('list', req)
         return sources.splitNoOrphans('\n')
     }
-    async readFile(req: PathRequest): Promise<string> {
-        return await this.sendParametric('readFile', req)
+    async mkdir(req: PathRequest): Promise<void> {
+        await this.sendParametric('mkdir', req)
     }
+    async readFile(req: PathRequest): Promise<Blob> {
+        return this.sendParametric('readFile', req, undefined, false)
+    }
+    async savePhysical(req: SaveRequest, content: Body): Promise<void> {
+        await this.sendParametric('savePhysical', req, content)
+    }
+    async saveVirtual(req: SaveRequest, content: Body): Promise<void> {
+        await this.sendParametric('saveVirtual', req, content)
+    }
+    /**
+     * Tries to save physically, if it fails, it saves virtually
+     */
+    async save(req: SaveRequest, content: Body): Promise<void> {
+        await this.sendParametric('save', req, content, false)
+    }
+
+    async rename(req: { from: string, to: string } & Seq): Promise<void> {
+        await this.sendParametric('rename', req)
+    }
+
+    async untag(req: PathRequest): Promise<void> {
+        await this.sendParametric('untag', req)
+    }
+
     /**
      * Translates a path from the real to virtual file system
      * @param req An absolute filesystem path
@@ -388,7 +437,8 @@ String.prototype.splitNoOrphans = function (separator: string | RegExp, limit?: 
     return arr
 }
 
-export interface CommunicatorImpl extends vscode.Disposable {
+export interface ICommunicatorImpl extends vscode.Disposable {
+    scheme: DeshaderScheme,
     onConnected: Set<VoidFunction>
     onDisconnected: Set<VoidFunction>
     onMessage: Set<MessageCallback>
@@ -396,12 +446,14 @@ export interface CommunicatorImpl extends vscode.Disposable {
     disconnect(): void
     open(): Promise<void>
 
-    sendCommand(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
-    sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string>
-    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T>
+    sendCommand<OutputString = true>(command: string, body?: Body, seq?: number, outputString?: OutputString): Promise<OutputString extends false ? Blob : string>
+    sendParametric<OutputString = true>(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: Body, outputString?: OutputString): Promise<OutputString extends false ? Blob : string>
+    sendParametricJson<T>(command: string, params: MapLike<string | number | boolean | null | undefined> | object, body?: Body): Promise<T>
 
     ensureConnected(): Promise<void>
     get isConnected(): boolean
+    get isConnecting(): boolean
+    get connectionState(): ConnectionState
 }
 
 /**
@@ -462,7 +514,7 @@ export class WebSocketContainer implements vscode.Disposable {
             try {
                 this.ws = new WebSocket(this._endpoint)
                 this.ws.addEventListener('error', ev => {
-                    if(remaining == 0){
+                    if (remaining == 0) {
                         this.ws!.onclose = null
                         this.disconnect(ev)
                     }
@@ -489,8 +541,8 @@ export class WebSocketContainer implements vscode.Disposable {
                         }, config.get<number>("readyCheck", 800))
                     })
                 }
-                await this.connected;
-                break;// success
+                await this.connected
+                break// success
             } catch (e) {
                 if (remaining == 0) {
                     this._rejectConnected(e)
@@ -515,6 +567,21 @@ export class WebSocketContainer implements vscode.Disposable {
         return this.ws?.readyState == WebSocket.OPEN
     }
 
+    get isConnecting() {
+        return this.ws?.readyState == WebSocket.CONNECTING
+    }
+
+    get connectionState() {
+        switch (this.ws?.readyState) {
+            case WebSocket.CONNECTING:
+                return ConnectionState.Connecting
+            case WebSocket.OPEN:
+                return ConnectionState.Connected
+            default:
+                return ConnectionState.Disconnected
+        }
+    }
+
     disconnect(reason?: any) {
         this.ws?.close(typeof reason === 'number' ? reason : undefined, typeof reason === 'string' ? reason : undefined)
         this.ws = null
@@ -536,18 +603,22 @@ export class WebSocketContainer implements vscode.Disposable {
     }
 }
 
-export class WSCommunicator extends WebSocketContainer implements CommunicatorImpl {
+export class WSCommunicator extends WebSocketContainer implements ICommunicatorImpl {
+    static scheme: DeshaderScheme = 'deshaderws'
+    scheme = WSCommunicator.scheme
     comm: Communicator
     pendingRequests: MapLike<{
         promise: Promise<any> | null,
         name?: string,
-        resolve: (response: Blob) => void
+        resolve: (response: Blob | string) => void
         reject: (response: string) => void
     }> = {};
+    trace = false
 
     constructor(comm: Communicator, open = true) {
         super(comm.endpointURL || undefined, open)
         this.comm = comm
+        this.trace = vscode.workspace.getConfiguration('deshader.communicator').get<boolean>('trace', false)
     }
 
     close() {
@@ -557,25 +628,32 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
     async open() {
         await super.open()
         this.connected.then(() => this.comm.emit(Events.connected))
-        this.ws!.addEventListener('message', (event) => {
-            const responseLines: string[] = splitStringToNParts(event.data, '\n', 3)//0: status, 1: echoed command / seq, 2: body
+        this.ws!.addEventListener('message', (event: MessageEvent<Blob | string>) => {
+            // TODO: do not toString
+            const asString = event.data.toString()
+            const responseLines: string[] = splitStringToNParts(asString, '\n', 3)//0: status, 1: echoed command / seq, 2: body
             if (responseLines[0].startsWith('600')) {// event (pushed by Deshader library)
                 this.comm.emit(Events[responseLines[1]], responseLines[2])
-                this.comm.output.appendLine(event.data)
+                if (this.trace)
+                    this.comm.output.appendLine(asString)
             }
             else {
                 let found = false
                 for (let [command, actions] of Object.entries(this.pendingRequests)) {
                     if (responseLines.length > 1 && responseLines[1] == command) {
-                        this.comm.output.appendLine(responseLines[0])
-                        this.comm.output.appendLine(actions.name ?? responseLines[1])
-                        this.comm.output.appendLine(responseLines[2])
+                        if (this.trace) {
+                            this.comm.output.appendLine(responseLines[0])
+                            this.comm.output.appendLine(actions.name ?? responseLines[1])
+                            this.comm.output.appendLine(responseLines[2])
+                        }
                         found = true
 
                         const resp = responseLines[2]
-                        this.comm.emit(Events.message, resp)
+                        if (this.trace) {
+                            this.comm.emit(Events.message, resp)
+                        }
                         if (responseLines[0].startsWith('202')) {// success
-                            actions.resolve(new Blob([resp]))
+                            actions.resolve(event.data.slice(responseLines.slice(0, 2).reduceRight((acc, cur) => acc + cur.length + 1, 0)))
                         }
                         else if (responseLines[0].startsWith('500')) {// error
                             actions.reject(responseLines[2].slice(6))// skip "error." prefix
@@ -597,12 +675,12 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
         })
     }
 
-    sendParametricJson<T>(command: string, params?: MapLike<string | number | boolean | null | undefined> | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<T> {
-        const str = this.sendParametric(command, params, body)
+    sendParametricJson<T>(command: string, params?: MapLike<string | number | boolean | null | undefined> | object, body?: Body): Promise<T> {
+        const str = this.sendParametric(command, params, body, true)
         return str.then((response) => JSON.parse(response) as T)
     }
 
-    sendParametric(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: string | ArrayBufferLike | Blob | ArrayBufferView): Promise<string> {
+    sendParametric<OutputString = true>(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: Body, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
         let i = 0
         let seq: number | undefined
         if (typeof params !== 'undefined') {
@@ -625,7 +703,7 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
     }
 
     shown = 0
-    async sendCommand(command: string, body?: string | ArrayBufferLike | Blob | ArrayBufferView, seq?: number): Promise<string> {
+    async sendCommand<OutputString = true>(command: string, body?: Body, seq?: number, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
         if (!this.isConnected) {
             if (this.shown++ < 3) {
                 const item = await vscode.window.showErrorMessage("Deshader command server is not connected", "Connect")
@@ -639,7 +717,7 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
         const id = seq ?? command
         const didntExist = typeof this.pendingRequests[id] === 'undefined'
         if (didntExist) {
-            const p = new Promise<string>((_resolve, _reject) => {
+            const p = new Promise<string | Blob>((_resolve, _reject) => {
                 const t = setTimeout(() => {
                     _reject(new Error('Request timed out'))
                     delete this.pendingRequests[id]
@@ -649,7 +727,10 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
                     promise: null,
                     resolve(response) {
                         clearTimeout(t)
-                        _resolve(response.text())
+                        _resolve(typeof response === 'string' ?
+                            outputString ? response : new Blob([response]) :
+                            outputString ? response.text() : response
+                        )
                         delete self.pendingRequests[id]
                     },
                     async reject(response) {
@@ -664,13 +745,63 @@ export class WSCommunicator extends WebSocketContainer implements CommunicatorIm
             if ((this.ws?.readyState ?? WebSocket.CONNECTING) == WebSocket.CONNECTING) { await this.connected }
             this.ws!.send(new Blob([command, ...body ? [body] : []]))
             this.comm.output.appendLine(`${command}\n${body ?? ""}`)
-            return await p
+            return await p as OutputString extends false ? Blob : string
         } else {
             this.comm.output.appendLine(`Duplicate send request ${seq ?? ""} ${command} ${body ?? ""}`)
             return await this.pendingRequests[id].promise
         }
     }
 }
+
+export function isTagged(path: string): boolean {
+    return !path.startsWith("/untagged")
+}
+
+export function normalizeScheme(scheme: DeshaderOrRawScheme): DeshaderScheme {
+    if (DeshaderSchemes.includes(scheme as DeshaderScheme)) {
+        return scheme as DeshaderScheme
+    } else switch (scheme) {
+        case 'http':
+            return 'deshader'
+        case 'https':
+            return 'deshaders'
+        case 'ws':
+            return 'deshaderws'
+        case 'wss':
+            return 'deshaderwss'
+        default:
+            throw new Error(`Unknown scheme ${scheme}`)
+    }
+}
+
+type WithColon<T> = T extends string ? `${T}:` : never
+function protocolToRaw(protocol: WithColon<DeshaderOrRawScheme>): WithColon<RawScheme> {
+    if (RawSchemes.includes(protocol.slice(0, protocol.length - 1) as RawScheme)) {
+        return protocol as WithColon<RawScheme>
+    } else switch (protocol) {
+        case 'deshader:':
+            return 'http:'
+        case 'deshaders:':
+            return 'https:'
+        case 'deshaderws:':
+            return 'ws:'
+        case 'deshaderwss:':
+            return 'wss:'
+        default:
+            throw new Error(`Unknown protocol ${protocol}`)
+    }
+}
+
+function protocolToImpl(protocol: WithColon<RawScheme>): new (comm: Communicator, open?: boolean) => ICommunicatorImpl {
+    switch (protocol) {
+        case 'ws:':
+        case 'wss:':
+            return WSCommunicator
+        default:
+            throw new Error(`Unimplemented protocol ${protocol}`)
+    }
+}
+
 
 function splitStringToNParts(str: string, separator: string, n: number) {
     let parts: string[] = []
