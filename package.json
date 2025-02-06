@@ -40,7 +40,9 @@
     "onFileSystem:deshaderwss",
     "onSearch:deshader",
     "onResolveRemoteAuthority:deshader",
-    "onView:deshader"
+    "onResolveRemoteAuthority:deshaders",
+    "onResolveRemoteAuthority:deshaderws",
+    "onResolveRemoteAuthority:deshaderwss"
   ],
   "browser": "./dist/extension.js",
   "main": "./dist/extension.js",
@@ -233,8 +235,8 @@
         "icon": "$(terminal)"
       },
       {
-        "command": "deshader.openWorkspace",
-        "title": "Deshader: Open shader workspace",
+        "command": "deshader.addWorkspace",
+        "title": "Deshader: Add virtual shader workspace",
         "category": "Deshader",
         "icon": "$(file-directory)"
       },
@@ -255,6 +257,18 @@
         "title": "Show instrumented code",
         "category": "Deshader",
         "icon": "$(circuit-board)"
+      },
+      {
+        "command": "deshader.window",
+        "title": "Deshader: Open virtual workspace as remote",
+        "category": "Deshader",
+        "icon": "$(window)"
+      },
+      {
+        "command": "deshader.newWindow",
+        "title": "Deshader: Open virtual workspace in new window",
+        "category": "Deshader",
+        "icon": "$(window)"
       }
     ],
     "menus": {
@@ -282,20 +296,30 @@
       ],
       "explorer/title": [
         {
-          "command": "deshader.openWorkspace",
+          "command": "deshader.addWorkspace",
           "group": "navigation"
         }
       ],
 			"statusBar/remoteIndicator": [
         {
           "command": "deshader.connect",
-          "when": "remoteConnectionState == disconnected || !remoteConnectionState",
+          "when": "remoteConnectionState == disconnected || !remoteConnectionState && !deshader.connected",
           "group": "remote_20_deshader_1general@1"
         },
         {
           "command": "deshader.disconnect",
-          "when": "remoteName =~ /^deshader$/ && remoteConnectionState == connected",
+          "when": "remoteName =~ /^deshader$/ && remoteConnectionState == connected || deshader.connected",
           "group": "remote_20_deshader_1general@2"
+        },
+        {
+          "command": "deshader.window",
+          "when": "remoteConnectionState == disconnected || !remoteConnectionState",
+          "group": "remote_20_deshader_1general@3"
+        },
+        {
+          "command": "deshader.newWindow",
+          "when": "remoteConnectionState == disconnected || !remoteConnectionState",
+          "group": "remote_20_deshader_1general@4"
         }
       ]
     },
@@ -330,12 +354,12 @@
       },
       {
         "view": "explorer",
-        "contents": "\n[Open shader workspace](command:deshader.openWorkspace)\n",
+        "contents": "\n[Add shader workspace](command:deshader.addWorkspace)\n",
         "when": "deshader.connected"
       },
       {
         "view": "deshader",
-        "contents": "\n[Open shader workspace](command:deshader.openWorkspace)\n"
+        "contents": "Deshader workspaces can be added to an existing VSCode workspace, or opened as remote.\n[Add shader workspace](command:deshader.addWorkspace)\n[Open as remote](command:deshader.window)\n[Open in new window](command:deshader.newWindow)\n"
       }
     ],
     "views": {

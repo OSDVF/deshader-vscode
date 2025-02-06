@@ -13,21 +13,33 @@ import { browseFile } from './RPC'
 import Commands from './commands'
 import { DeshaderRemoteResolver } from './remote'
 
-const DEFAULT_CONNECTION = 'ws://127.0.0.1:8082'
+const DEFAULT_CONNECTION = 'deshaderws://127.0.0.1:8082'
 
 const SUPPORTS_REMOTE = 'registerRemoteAuthorityResolver' in vscode.workspace
+let webNoticeShown = false
 export function activate(context: vscode.ExtensionContext) {
 	const output = vscode.window.createOutputChannel('Deshader')
 	const comm = new Communicator(output)
 	const fs = new DeshaderFilesystem(output, comm)
 	for (const s of DeshaderSchemes)
 		context.subscriptions.push(vscode.workspace.registerFileSystemProvider(s, fs, { isCaseSensitive: true, isReadonly: false }))
+	let remoteFilesystemProvidersRegistered = false
 	context.subscriptions.push(output)
 	context.subscriptions.push(comm)
 	if (SUPPORTS_REMOTE) {
-		const resolver = new DeshaderRemoteResolver()
-		context.subscriptions.push(vscode.workspace.registerRemoteAuthorityResolver(DeshaderSchemes[0], resolver))
+		const resolver = new DeshaderRemoteResolver(comm)
+		for (const s of DeshaderSchemes)
+			context.subscriptions.push(vscode.workspace.registerRemoteAuthorityResolver(s, resolver))
+
+		for (const f of vscode.workspace.workspaceFolders || []) {
+			registerRemoteFileProvider(f)
+		}
 	}
+	vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+		for (const a of e.added) {
+			registerRemoteFileProvider(a)
+		}
+	})
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
 
 	const lspContainer = new WebSocketContainer()
@@ -110,7 +122,8 @@ export function activate(context: vscode.ExtensionContext) {
 			title: 'Select Executable Program'
 		}).then(uris => uris?.[0].fsPath)),
 		vscode.commands.registerCommand(Commands.connect, async (args) => {
-			const input: string | undefined = typeof args === 'string' ? args : undefined
+			const [input, force]: [string | undefined, boolean | undefined] = Array.isArray(args) ? args as any : [args, false]
+
 			if (comm.isConnected && warnAlreadyConnected) {
 				const response = await vscode.window.showWarningMessage('Deshader is already connected. Do you want to reconnect?', 'Yes', 'No', 'Never ask again')
 				if (response === 'No') {
@@ -121,13 +134,10 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 			}
 
-			const response = input ? input : await vscode.window.showInputBox({
-				placeHolder: 'Please enter the connection string',
-				value: DEFAULT_CONNECTION
-			})
+			const response = input ? input : await askForConnectionString()
 			if (response) {
 				try {
-					await deshaderConnect(response)
+					await deshaderConnect(response, undefined, force)
 					return comm.endpointURL
 				} catch (e) {
 					vscode.window.showErrorMessage(`Failed to connect to Deshader (${comm.endpointURL}): ${unknownToString(e)}`)
@@ -145,7 +155,7 @@ export function activate(context: vscode.ExtensionContext) {
 			await comm.ensureConnected()
 			if (comm.isConnected) { vscode.window.createTerminal(deshaderTerminal(comm)).show() }
 		}),
-		vscode.commands.registerCommand(Commands.openWorkspace, async () => {
+		vscode.commands.registerCommand(Commands.addWorkspace, async () => {
 			if (comm.connectionState == ConnectionState.Disconnected) {
 				await vscode.commands.executeCommand(Commands.connect)
 				if (comm.connectionState == ConnectionState.Disconnected) {
@@ -158,7 +168,10 @@ export function activate(context: vscode.ExtensionContext) {
 					return
 				}
 			}
-			return vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length || 0, 0, { uri: vscode.Uri.from({ scheme: comm.scheme!, authority: comm.endpointURL?.host, path: "/" }) })
+
+			return vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length || 0, 0, {
+				uri: vscode.Uri.from({ scheme: comm.scheme!, authority: comm.endpointURL?.host, path: "/" })
+			})
 		}),
 		vscode.commands.registerCommand(Commands.connectLsp, async () => {
 			await vscode.commands.executeCommand(Commands.connect)
@@ -254,6 +267,12 @@ export function activate(context: vscode.ExtensionContext) {
 				await notDebuggingMessage()
 			}
 		}),
+		vscode.commands.registerCommand(Commands.window, () => {
+			return openRemoteWindow(true)
+		}),
+		vscode.commands.registerCommand(Commands.newWindow, () => {
+			return openRemoteWindow(false)
+		}),
 		vscode.window.registerTerminalProfileProvider(PROFILE, {
 			async provideTerminalProfile(): Promise<vscode.TerminalProfile> {
 				await comm.ensureConnected()
@@ -289,7 +308,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}))
 	}
 
-	async function deshaderConnect(commURL?: string | URL | vscode.Uri, lspURL?: string | URL) {
+	async function deshaderConnect(commURL?: string | URL | vscode.Uri, lspURL?: string | URL, openAfterConnect?: boolean) {
 		try {
 			if (commURL) {
 				comm.endpointURL = commURL
@@ -298,8 +317,8 @@ export function activate(context: vscode.ExtensionContext) {
 				lspContainer.endpoint = lspURL
 			}
 			const config = vscode.workspace.getConfiguration('deshader')
-			if (config.get<boolean>('openAfterConnect', true)) {
-				vscode.commands.executeCommand(Commands.openWorkspace)
+			if (openAfterConnect ?? config.get<boolean>('openAfterConnect', true)) {
+				vscode.commands.executeCommand(Commands.addWorkspace)
 			}
 		} catch (e) {
 			output.appendLine(unknownToString(e))
@@ -322,6 +341,38 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		deshaderConnect(deshader.commands, deshader.lsp)
 	}
+
+	function registerRemoteFileProvider(f: vscode.WorkspaceFolder) {
+		if (!remoteFilesystemProvidersRegistered && f.uri.scheme === 'vscode-remote' && f.uri.authority.startsWith('deshader')) {
+			remoteFilesystemProvidersRegistered = true
+			context.subscriptions.push(vscode.workspace.registerFileSystemProvider('vscode-remote', fs, { isCaseSensitive: true, isReadonly: false }))
+		}
+	}
+	async function openRemoteWindow(resuseWindow: boolean) {
+		const input = await askForConnectionString()
+		if (input) {
+			const uri = vscode.Uri.parse(input)
+			if (!DeshaderSchemes.includes(uri.scheme as DeshaderScheme)) {
+				vscode.window.showErrorMessage('Only these schemes are supported: ' + DeshaderSchemes.join(', '))
+			}
+			const remoteUri = vscode.Uri.from({ scheme: 'vscode-remote', authority: `${uri.scheme}+${uri.authority}`, path: "/" })
+			const workspace = { uri: remoteUri, name: 'Deshader ' + uri.authority, index: 0 }
+			registerRemoteFileProvider(workspace)
+			if (vscode.env.appHost === 'web') {
+				if (!webNoticeShown) vscode.window.showInformationMessage('Multiple windows are not supported')
+				return vscode.workspace.updateWorkspaceFolders(0, 0, workspace)
+			}
+			else return vscode.commands.executeCommand('vscode.newWindow', { remoteAuthority: `${uri.scheme}+${uri.authority}`, resuseWindow })
+		}
+		return undefined
+	}
+}
+
+async function askForConnectionString() {
+	return await vscode.window.showInputBox({
+		placeHolder: 'Please enter the connection string',
+		value: DEFAULT_CONNECTION
+	})
 }
 
 // This method is called when your extension is deactivated
