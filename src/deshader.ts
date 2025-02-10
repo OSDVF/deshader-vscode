@@ -14,7 +14,7 @@ export type RawScheme = typeof RawSchemes[number]
 export const DeshaderSchemesAndRaw = [...DeshaderSchemes, ...RawSchemes] as const
 export type DeshaderScheme = typeof DeshaderSchemes[number]
 export type DeshaderOrRawScheme = typeof DeshaderSchemesAndRaw[number]
-export enum ConnectionState {Connecting, Connected, Disconnected}
+export enum ConnectionState { Connecting, Connected, Disconnected }
 export const Events = {
     connected: Symbol(),
     message: Symbol(),
@@ -438,7 +438,6 @@ String.prototype.splitNoOrphans = function (separator: string | RegExp, limit?: 
 }
 
 export interface ICommunicatorImpl extends vscode.Disposable {
-    scheme: DeshaderScheme,
     onConnected: Set<VoidFunction>
     onDisconnected: Set<VoidFunction>
     onMessage: Set<MessageCallback>
@@ -454,6 +453,7 @@ export interface ICommunicatorImpl extends vscode.Disposable {
     get isConnected(): boolean
     get isConnecting(): boolean
     get connectionState(): ConnectionState
+    get scheme(): DeshaderScheme,
 }
 
 /**
@@ -469,13 +469,13 @@ export class WebSocketContainer implements vscode.Disposable {
     private _rejectConnected!: (reason?: any) => void
     private _endpoint!: URL
 
-    constructor(defaultURL?: string | URL, open: boolean = true) {
+    constructor(defaultURL?: URL, open: boolean = true) {
         this.connected = new Promise<void>((resolve, reject) => {
             this._resolveConnected = resolve
             this._rejectConnected = reject
         })
         if (defaultURL) {
-            this.endpoint = defaultURL
+            this._endpoint = defaultURL
             if (open) {
                 this.open()
             }
@@ -483,7 +483,7 @@ export class WebSocketContainer implements vscode.Disposable {
     }
 
     get endpoint(): URL {
-        return this.endpoint
+        return this._endpoint
     }
 
     set endpoint(value: URL | string) {
@@ -514,8 +514,8 @@ export class WebSocketContainer implements vscode.Disposable {
             try {
                 this.ws = new WebSocket(this._endpoint)
                 this.ws.addEventListener('error', ev => {
-                    if (remaining == 0) {
-                        this.ws!.onclose = null
+                    if (remaining == 0 && this.ws) {
+                        this.ws.onclose = null
                         this.disconnect(ev)
                     }
                     this.connected = new Promise((resolve, reject) => {
@@ -524,8 +524,10 @@ export class WebSocketContainer implements vscode.Disposable {
                     })
                 })
                 this.ws.addEventListener('close', ev => {
-                    this.ws!.onclose = null
-                    this.disconnect(ev)
+                    if (this.ws) {
+                        this.ws.onclose = null
+                        this.disconnect(ev)
+                    }
                 })
                 if (this.ws.readyState == WebSocket.OPEN) {
                     this.onConnected.forEach(l => l())
@@ -604,8 +606,6 @@ export class WebSocketContainer implements vscode.Disposable {
 }
 
 export class WSCommunicator extends WebSocketContainer implements ICommunicatorImpl {
-    static scheme: DeshaderScheme = 'deshaderws'
-    scheme = WSCommunicator.scheme
     comm: Communicator
     pendingRequests: MapLike<{
         promise: Promise<any> | null,
@@ -613,16 +613,23 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
         resolve: (response: Blob | string) => void
         reject: (response: string) => void
     }> = {};
-    trace = false
+    private trace = false
 
     constructor(comm: Communicator, open = true) {
         super(comm.endpointURL || undefined, open)
         this.comm = comm
         this.trace = vscode.workspace.getConfiguration('deshader.communicator').get<boolean>('trace', false)
+        vscode.workspace.onDidChangeConfiguration(e=>{
+            e.affectsConfiguration('deshader.communicator.trace') && (this.trace = vscode.workspace.getConfiguration('deshader.communicator').get<boolean>('trace', false))
+        })
     }
 
     close() {
         this.ws?.close()
+    }
+
+    get scheme() {
+        return normalizeScheme(this.endpoint.protocol.slice(0, this.endpoint.protocol.length - 1) as DeshaderOrRawScheme)
     }
 
     async open() {
@@ -704,7 +711,7 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
 
     shown = 0
     async sendCommand<OutputString = true>(command: string, body?: Body, seq?: number, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
-        if (!this.isConnected) {
+        if (this.connectionState == ConnectionState.Disconnected) {
             if (this.shown++ < 3) {
                 const item = await vscode.window.showErrorMessage("Deshader command server is not connected", "Connect")
                 if (item) {
@@ -743,13 +750,14 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
             })
             this.pendingRequests[id].promise = p
             if ((this.ws?.readyState ?? WebSocket.CONNECTING) == WebSocket.CONNECTING) { await this.connected }
-            this.ws!.send(new Blob([command, ...body ? [body] : []]))
             this.comm.output.appendLine(`${command}\n${body ?? ""}`)
-            return await p as OutputString extends false ? Blob : string
+            this.ws!.send(new Blob([command, ...(body ? [body] : [])]))
+            return p as Promise<OutputString extends false ? Blob : string>
         } else {
             this.comm.output.appendLine(`Duplicate send request ${seq ?? ""} ${command} ${body ?? ""}`)
-            return await this.pendingRequests[id].promise
+            return this.pendingRequests[id].promise
         }
+
     }
 }
 
@@ -774,8 +782,8 @@ export function normalizeScheme(scheme: DeshaderOrRawScheme): DeshaderScheme {
     }
 }
 
-type WithColon<T> = T extends string ? `${T}:` : never
-function protocolToRaw(protocol: WithColon<DeshaderOrRawScheme>): WithColon<RawScheme> {
+export type WithColon<T> = T extends string ? `${T}:` : never
+export function protocolToRaw(protocol: WithColon<DeshaderOrRawScheme>): WithColon<RawScheme> {
     if (RawSchemes.includes(protocol.slice(0, protocol.length - 1) as RawScheme)) {
         return protocol as WithColon<RawScheme>
     } else switch (protocol) {

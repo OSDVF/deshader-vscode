@@ -4,7 +4,7 @@ import * as vscode from 'vscode'
 import { ProviderResult } from 'vscode'
 import { DebugSession, deshaderSessions } from './debug/session'
 import { DeshaderFilesystem } from './filesystem'
-import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, RunningShader, WebSocketContainer } from './deshader'
+import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, protocolToRaw, RunningShader, WebSocketContainer, WithColon } from './deshader'
 import { deshaderTerminal, PROFILE } from './terminal'
 import { deshaderLanguageClient } from './language'
 import { unknownToString } from './format'
@@ -44,8 +44,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const lspContainer = new WebSocketContainer()
 	context.subscriptions.push(lspContainer)
-	const languageClient = deshaderLanguageClient(lspContainer)
-	context.subscriptions.push(languageClient)
 
 	async function notDebuggingMessage() {
 		vscode.window.showErrorMessage("Deshader debugging session isn't currently active")
@@ -110,6 +108,7 @@ export function activate(context: vscode.ExtensionContext) {
 	})
 
 	let warnAlreadyConnected = true
+	let connPrompt: Promise<URL | null> | null = null
 
 	// Register disposables
 	context.subscriptions.push(
@@ -121,29 +120,36 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(Commands.browseFile, () => typeof deshader !== 'undefined' ? browseFile() : vscode.window.showOpenDialog({
 			title: 'Select Executable Program'
 		}).then(uris => uris?.[0].fsPath)),
-		vscode.commands.registerCommand(Commands.connect, async (args) => {
-			const [input, force]: [string | undefined, boolean | undefined] = Array.isArray(args) ? args as any : [args, false]
-
-			if (comm.isConnected && warnAlreadyConnected) {
-				const response = await vscode.window.showWarningMessage('Deshader is already connected. Do you want to reconnect?', 'Yes', 'No', 'Never ask again')
-				if (response === 'No') {
-					return comm.endpointURL
-				}
-				if (response === 'Never ask again') {
-					warnAlreadyConnected = false
-				}
+		vscode.commands.registerCommand(Commands.connect, (args) => {
+			if (connPrompt) {
+				return connPrompt
 			}
+			connPrompt = (async () => {
+				const [input, force]: [string | undefined, boolean | undefined] = Array.isArray(args) ? args as any : [args, false]
 
-			const response = input ? input : await askForConnectionString()
-			if (response) {
-				try {
-					await deshaderConnect(response, undefined, force)
-					return comm.endpointURL
-				} catch (e) {
-					vscode.window.showErrorMessage(`Failed to connect to Deshader (${comm.endpointURL}): ${unknownToString(e)}`)
+				if (comm.isConnected && warnAlreadyConnected) {
+					const response = await vscode.window.showWarningMessage('Deshader is already connected. Do you want to reconnect?', 'Yes', 'No', 'Never ask again')
+					if (response === 'No') {
+						return comm.endpointURL
+					}
+					if (response === 'Never ask again') {
+						warnAlreadyConnected = false
+					}
 				}
-			}
-			return null
+
+				const response = input ? input : await askForConnectionString()
+				if (response) {
+					try {
+						await deshaderConnect(response, undefined, force)
+						return comm.endpointURL
+					} catch (e) {
+						vscode.window.showErrorMessage(`Failed to connect to Deshader (${comm.endpointURL}): ${unknownToString(e)}`)
+					}
+				}
+				return null
+			})()
+			connPrompt.finally(() => connPrompt = null)
+			return connPrompt
 		}),
 		vscode.commands.registerCommand(Commands.disconnect, () => {
 			if (comm.isConnected) {
@@ -308,6 +314,28 @@ export function activate(context: vscode.ExtensionContext) {
 		}))
 	}
 
+	// Automatically connect if running inside deshader-integrated vscode
+	if (typeof deshader !== 'undefined' && connPrompt == null) {
+		if (!deshader.commands) {
+			// suggest default connection :)
+			const url = new URL(DEFAULT_CONNECTION)
+			url.protocol = protocolToRaw(url.protocol as WithColon<DeshaderScheme>)
+			const ws = new WebSocket(url)
+			ws.onopen = async () => {
+				ws.close()
+				if (connPrompt != null) return
+				const response = await vscode.window.showInformationMessage('Deshader detected at the default connection (' + DEFAULT_CONNECTION + ')', 'Connect')
+				if (response) {
+					deshaderConnect(DEFAULT_CONNECTION)
+				}
+			}
+		}
+		deshaderConnect(deshader.commands, deshader.lsp)
+	}
+
+	const languageClient = deshaderLanguageClient(lspContainer)
+	context.subscriptions.push(languageClient)
+
 	async function deshaderConnect(commURL?: string | URL | vscode.Uri, lspURL?: string | URL, openAfterConnect?: boolean) {
 		try {
 			if (commURL) {
@@ -324,22 +352,6 @@ export function activate(context: vscode.ExtensionContext) {
 			output.appendLine(unknownToString(e))
 			throw e
 		}
-	}
-
-	// Automatically connect if running inside deshader-integrated vscode
-	if (typeof deshader !== 'undefined') {
-		if (!deshader.commands) {
-			// suggest default connection :)
-			const ws = new WebSocket(DEFAULT_CONNECTION)
-			ws.onopen = async () => {
-				ws.close()
-				const response = await vscode.window.showInformationMessage('Deshader detected at the default connection (' + DEFAULT_CONNECTION + ')', 'Connect')
-				if (response) {
-					deshaderConnect(DEFAULT_CONNECTION)
-				}
-			}
-		}
-		deshaderConnect(deshader.commands, deshader.lsp)
 	}
 
 	function registerRemoteFileProvider(f: vscode.WorkspaceFolder) {

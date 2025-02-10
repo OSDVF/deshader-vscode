@@ -39,6 +39,7 @@
     "onFileSystem:deshaderws",
     "onFileSystem:deshaderwss",
     "onSearch:deshader",
+    "workspaceContains:**/.deshader",
     "onResolveRemoteAuthority:deshader",
     "onResolveRemoteAuthority:deshaders",
     "onResolveRemoteAuthority:deshaderws",
@@ -291,7 +292,6 @@
           "command": "deshader.showInstrumented",
           "group": "navigation",
           "when": "resourceLangId == glsl && !explorerResourceIsFolder && debugType == deshader"
-
         }
       ],
       "explorer/title": [
@@ -300,7 +300,7 @@
           "group": "navigation"
         }
       ],
-			"statusBar/remoteIndicator": [
+      "statusBar/remoteIndicator": [
         {
           "command": "deshader.connect",
           "when": "remoteConnectionState == disconnected || !remoteConnectionState && !deshader.connected",
@@ -325,18 +325,18 @@
     },
     "resourceLabelFormatters": [
       {
-          "scheme": "vscode-remote",
-          "authority": "deshader+*",
-          "formatting": {
-              "label": "${path}",
-              "separator": "/",
-              "tildify": true,
-              "stripPathStartingSeparator": true,
-              "workspaceSuffix": "Deshader",
-              "workspaceTooltip": "Deshader virtual shader workspace"
-          }
+        "scheme": "vscode-remote",
+        "authority": "deshader*",
+        "formatting": {
+          "label": "deshader:/${path}",
+          "separator": "/",
+          "tildify": true,
+          "stripPathStartingSeparator": true,
+          "workspaceSuffix": "Deshader",
+          "workspaceTooltip": "Deshader virtual shader workspace"
+        }
       }
-  ],
+    ],
     "terminal": {
       "profiles": [
         {
@@ -349,7 +349,7 @@
     "viewsWelcome": [
       {
         "view": "explorer",
-        "contents": "In order to use Deshader, connect to a running instance of the Deshader Library.\n[Connect](command:deshader.connect)\nTo learn more about how to use Deshader [read its docs](https://github.com/OSDVF/deshader/blob/main/guide/README.md).",
+        "contents": "🔦 In order to use Deshader, connect to a running instance of the Deshader Library.\n[Connect](command:deshader.connect)\nTo learn more about how to use Deshader [read its docs](https://github.com/OSDVF/deshader/blob/main/guide/README.md).",
         "when": "!deshader.connected"
       },
       {
@@ -431,7 +431,7 @@
     "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process --define \"process=undefined\"",
     "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\" --define \"process=undefined\"",
     "dev": "bun run compile-dev --watch",
-    "postinstall": "bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts",
+    "postinstall": "if [ ! -f vscode.proposed.resolvers.d.ts ]; then bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts; fi",
     "lint": "eslint .",
     "lintfix": "eslint . --fix"
   },

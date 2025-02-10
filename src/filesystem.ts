@@ -177,6 +177,12 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		const result: [string, vscode.FileType][] = []
 
 		for (const f of list) {
+			const pathParts = f.split('/')
+			if (pathParts.length > 1 && pathParts.every(p => p.length > 0)) {
+				continue
+				// Is actually located a one more level deeper in the directory being listed
+			}
+
 			let maybeLink = vscode.FileType.Unknown//0
 			const linkParts = f.split('>')
 			if (linkParts.length > 1) {
