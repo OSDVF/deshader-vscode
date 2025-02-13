@@ -67,6 +67,11 @@ export type State = {
     singlePauseMode: boolean,
     lsp?: string,//URL
 }
+export type Settings = {
+    logIntoResponses: boolean,
+    singleChunkShader: boolean,
+    stackTraces: boolean,
+}
 export type AttachArguments = {
     connection?: string
     /** Automatically stop target after launch. If not specified, target does not stop. */
@@ -114,10 +119,16 @@ type MessageCallback = (event: MessageEvent) => void
 export class Communicator extends EventEmitter implements vscode.Disposable {
     output: vscode.OutputChannel
     private endpoint: URL | null = null
+    trace = false
     private impl: ICommunicatorImpl | null = null
     private _onConnected = new Set<VoidFunction>()
     private _onDisconnected = new Set<VoidFunction>()
     private _onMessage = new Set<MessageCallback>()
+    private _settings: Settings = {
+        logIntoResponses: true,
+        singleChunkShader: true,
+        stackTraces: true,
+    }
 
     constructor(output: vscode.OutputChannel, defaultURL?: string | URL | vscode.Uri, open = true) {
         super()
@@ -126,6 +137,23 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         this.output = output
         if (open && defaultURL) {
             this.open()
+        }
+        this.updateConfig()
+        vscode.workspace.onDidChangeConfiguration(e =>
+            (e.affectsConfiguration('deshader.tracing') || e.affectsConfiguration('deshader.debugging')) && this.updateConfig()
+        )
+    }
+
+    private updateConfig() {
+        const tracing = vscode.workspace.getConfiguration('deshader.tracing')
+        const debugging = vscode.workspace.getConfiguration('deshader.debugging')
+        this.trace = tracing.get<boolean>('enable', false)
+        this._settings.stackTraces = this.trace && tracing.get<boolean>('stacks', false)
+        this._settings.logIntoResponses = this.trace && tracing.get<boolean>('libraryLogs', false)
+        this._settings.singleChunkShader = debugging.get<boolean>('singleChunk', true)
+
+        if(this.isConnected) {
+            this.settings(this._settings)
         }
     }
 
@@ -178,7 +206,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
 
     shown = 0
-    private updateImpl() {
+    private async updateImpl() {
         if (this.impl) {
             this.impl.dispose()
             this._onMessage = this.impl.onMessage
@@ -191,7 +219,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
             this.impl.onConnected = this._onConnected
             this.impl.onDisconnected = this._onDisconnected
             this.impl.onMessage = this._onMessage
-            this.impl.open()
+            await this.impl.open()
+            this.settings(this._settings)
         } else {
             if (this.shown++ < 3) {
                 vscode.window.showErrorMessage("Connect to a Deshader command server first", "Connect").then((item) => {
@@ -231,10 +260,12 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         this.impl?.disconnect()
     }
     open(): void {
-        if (!this.impl) {
+        if (this.impl) {
+            this.impl.open()
+        }
+        else {
             this.updateImpl()
         }
-        this.impl!.open()
     }
 
     get isConnected(): boolean {
@@ -315,6 +346,14 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
 
     async untag(req: PathRequest): Promise<void> {
         await this.sendParametric('untag', req)
+    }
+
+    /**
+     * Get or set settings variable(s)
+     * @returns Settings variables separated by newline in the format key=value
+     */
+    settings(req?: Partial<Settings>): Promise<string> {
+        return this.sendParametric('settings', req)
     }
 
     /**
@@ -613,15 +652,10 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
         resolve: (response: Blob | string) => void
         reject: (response: string) => void
     }> = {};
-    private trace = false
 
     constructor(comm: Communicator, open = true) {
         super(comm.endpointURL || undefined, open)
         this.comm = comm
-        this.trace = vscode.workspace.getConfiguration('deshader.communicator').get<boolean>('trace', false)
-        vscode.workspace.onDidChangeConfiguration(e=>{
-            e.affectsConfiguration('deshader.communicator.trace') && (this.trace = vscode.workspace.getConfiguration('deshader.communicator').get<boolean>('trace', false))
-        })
     }
 
     close() {
@@ -641,14 +675,14 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
             const responseLines: string[] = splitStringToNParts(asString, '\n', 3)//0: status, 1: echoed command / seq, 2: body
             if (responseLines[0].startsWith('600')) {// event (pushed by Deshader library)
                 this.comm.emit(Events[responseLines[1]], responseLines[2])
-                if (this.trace)
+                if (this.comm.trace)
                     this.comm.output.appendLine(asString)
             }
             else {
                 let found = false
                 for (let [command, actions] of Object.entries(this.pendingRequests)) {
                     if (responseLines.length > 1 && responseLines[1] == command) {
-                        if (this.trace) {
+                        if (this.comm.trace) {
                             this.comm.output.appendLine(responseLines[0])
                             this.comm.output.appendLine(actions.name ?? responseLines[1])
                             this.comm.output.appendLine(responseLines[2])
@@ -656,7 +690,7 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
                         found = true
 
                         const resp = responseLines[2]
-                        if (this.trace) {
+                        if (this.comm.trace) {
                             this.comm.emit(Events.message, resp)
                         }
                         if (responseLines[0].startsWith('202')) {// success

@@ -12,6 +12,9 @@ import { ConfigurationProvider } from './debug/config'
 import { browseFile } from './RPC'
 import Commands from './commands'
 import { DeshaderRemoteResolver } from './remote'
+import { UAParser } from 'ua-parser-js'
+import path from 'path-browserify'
+import { nodeOnly } from './macros'
 
 const DEFAULT_CONNECTION = 'deshaderws://127.0.0.1:8082'
 
@@ -157,32 +160,182 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			initialStatusItemState()
 		}),
+		vscode.commands.registerCommand(Commands.download, async () => {
+			if (typeof deshader != 'undefined') {
+				if (await vscode.window.showQuickPick(['Yes', 'No'], {
+					ignoreFocusOut: true,
+					title: 'Download Deshader?',
+					placeHolder: 'This VSCode is already integrated with Deshader. Do you want to download it anyway?',
+				}) != 'Yes') return
+			}
+			if (!process.env.DOWNLOAD_ENDPOINT && !process.env.GITHUB_ENDPOINT && !process.env.GITHUB_FALLBACK) {
+				return vscode.window.showErrorMessage('The extension was built without a download endpoint')
+			}
+			let { os, arch, ext } = await getDeviceInfo()
+			if (!os || !ext) {
+				const selection = await vscode.window.showQuickPick<vscode.QuickPickItem & { arch?: boolean, os: typeof os, ext: typeof ext }>([{
+					label: 'Arch Linux',
+					os: 'linux',
+					picked: os == 'linux',
+					ext: 'tar.zst'
+				}, {
+					label: 'Debian-like Linux',
+					os: 'linux',
+					ext: 'deb'
+				}, {
+					label: 'Mac OS',
+					arch: true,
+					picked: os == 'macos',
+					os: 'macos',
+					ext: 'zip'
+				}, {
+					label: 'Windows',
+					picked: os == 'windows',
+					os: 'windows',
+					ext: 'zip'
+				}], { canPickMany: false, placeHolder: 'Select your OS' })
+				if (!selection) return
+
+				if (selection.arch || !ext) {
+					const archSelection = (await vscode.window.showQuickPick<vscode.QuickPickItem & { arch: typeof arch }>([{
+						label: 'x86_64',
+						arch: '-x86_64',
+						picked: arch == '-x86_64'
+					}, {
+						label: 'arm64',
+						arch: '-arm64',
+						picked: arch == '-arm64'
+					}, {
+						label: 'x86',
+						arch: '-x86',
+						picked: arch == '-x86'
+					}], { canPickMany: false, placeHolder: 'Select your architecture' }))
+					if (!archSelection) return
+					arch = archSelection.arch
+				}
+				os = selection.os
+				ext = selection.ext
+			}
+
+			let downloadEndpoint: string | undefined
+			if (process.env.GITHUB_ENDPOINT) {
+				try {
+					const ghRelease = await fetch(`${process.env.GITHUB_ENDPOINT}/latest`)
+					const ghReleaseJson = await ghRelease.json()
+					if (ghReleaseJson.assets) {
+						let includedArch: string | undefined
+						let includedOSandExt: string | undefined
+						for (const asset of ghReleaseJson.assets) {
+							if (asset.name.includes(os) && asset.name.includes(ext)) {
+								includedOSandExt = asset.browser_download_url
+								if (asset.name.includes(arch)) {
+									includedArch = asset.browser_download_url
+									break
+								}
+							}
+						}
+						if (includedArch) {
+							downloadEndpoint = includedArch
+						} else if (includedOSandExt) {
+							downloadEndpoint = includedOSandExt
+						}
+					}
+				} catch (e) {
+					console.error(e, 'Trying to download from the fallback endpoint')
+				}
+			}
+
+			if (!downloadEndpoint) {
+				try {
+					downloadEndpoint = eval('`' + process.env.DOWNLOAD_ENDPOINT + '`')
+				} catch (e) {
+					console.error(e)
+				}
+			}
+			if (downloadEndpoint) {
+				if (vscode.env.appHost == 'desktop') {
+					const dir = vscode.Uri.joinPath(context.globalStorageUri, "deshader-vscode_install")
+					const downloadDir = dir.fsPath + '.tmp'
+					const fs: typeof import('fs') = (await nodeOnly('fs') as typeof import('fs'))
+					const Readable = (await nodeOnly('stream') as typeof import('stream')).Readable
+					if (!fs.existsSync(downloadDir)) {
+						fs.mkdirSync(downloadDir)
+					}
+
+					const file = await fetch(downloadEndpoint)
+					const downloadedFile = path.join(downloadDir, path.basename(downloadEndpoint))
+					const stream = fs.createWriteStream(downloadedFile)
+					if (file.body) {
+						await new Promise((resolve, reject) => {
+							const w = Readable.fromWeb(file.body as any).pipe(stream)
+							w.on('finish', resolve)
+							w.on('error', reject)
+						})
+					}
+					await vscode.window.showInformationMessage('Deshader downloaded. Now extract it and set the path to the library in the extension settings', 'Open')
+					return await vscode.commands.executeCommand("revealFileInOS", downloadedFile)
+				} else {
+					try {
+						let resp = await fetch(downloadEndpoint, { method: 'head', mode: 'no-cors' })
+						if (resp.ok) {
+							return await vscode.env.openExternal(vscode.Uri.parse(downloadEndpoint))
+						}
+					} catch (e) {
+						console.error(e)
+					}
+				}
+			}
+
+			const opt = await vscode.window.showErrorMessage('Failed to download Deshader. Do you want to download it manually from ...?',
+				...process.env.GITHUB_FALLBACK ? [{
+					title: 'GitHub',
+					url: vscode.Uri.parse(process.env.GITHUB_FALLBACK)
+				}] : [], ...process.env.DOWNLOAD_ENDPOINT ? [{
+					title: 'Deshader Web',
+					url: vscode.Uri.parse(process.env.DOWNLOAD_ENDPOINT).with({ path: '' })
+				}] : [])
+			if (opt) {
+				return await vscode.env.openExternal(opt.url)
+			}
+			return undefined
+		}),
 		vscode.commands.registerCommand(Commands.newTerminal, async () => {
 			await comm.ensureConnected()
 			if (comm.isConnected) { vscode.window.createTerminal(deshaderTerminal(comm)).show() }
 		}),
 		vscode.commands.registerCommand(Commands.addWorkspace, async () => {
-			if (comm.connectionState == ConnectionState.Disconnected) {
-				await vscode.commands.executeCommand(Commands.connect)
-				if (comm.connectionState == ConnectionState.Disconnected) {
-					throw new Error('Not connected')
-				}
+			switch (comm.connectionState) {
+				case ConnectionState.Connecting:
+					await comm.ensureConnected()
+					break
+
+				case ConnectionState.Disconnected:
+					await vscode.commands.executeCommand(Commands.connect)
+					if (comm.connectionState == ConnectionState.Disconnected) {
+						throw new Error('Not connected')
+					}
+					break
 			}
+			let anotherDeshader = false
 			for (const f of vscode.workspace.workspaceFolders || []) {
-				if (f.uri.scheme === comm.scheme && f.uri.authority === comm.endpointURL?.host) {
-					vscode.window.showInformationMessage('Shader workspace already open')
-					return
+				if (f.uri.scheme === comm.scheme) {
+					if (f.uri.authority === comm.endpointURL?.host) {
+						vscode.window.showInformationMessage('Shader workspace already open')
+						return
+					}
+					anotherDeshader = true
 				}
 			}
 
 			return vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length || 0, 0, {
-				uri: vscode.Uri.from({ scheme: comm.scheme!, authority: comm.endpointURL?.host, path: "/" })
+				uri: vscode.Uri.from({ scheme: comm.scheme!, authority: comm.endpointURL?.host, path: "/" }),
+				name: anotherDeshader ? `Deshader ${comm.endpointURL!.hostname}` : "Deshader Virtual Workspace",
 			})
 		}),
 		vscode.commands.registerCommand(Commands.connectLsp, async () => {
 			await vscode.commands.executeCommand(Commands.connect)
 			const opts: vscode.InputBoxOptions & vscode.QuickPickOptions = {
-				title: "Remote langugage server", prompt: "Enter server URI", placeHolder: "ws://127.0.0.1:8083", canPickMany: false, validateInput(value) {
+				title: "Remote langugage server", prompt: "Enter server URI", placeHolder: "ws://127.0.0.1:8083", canPickMany: false, ignoreFocusOut: true, validateInput(value) {
 					try {
 						vscode.Uri.parse(value)
 					} catch (e) {
@@ -263,7 +416,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand(Commands.pauseMode, async () => {
 			const sess = vscode.debug.activeDebugSession
 			if (sess?.type === DebugSession.TYPE) {
-				const picked = await vscode.window.showQuickPick(["Single", "All"], { canPickMany: false })
+				const picked = await vscode.window.showQuickPick(["Single", "All"], { canPickMany: false, placeHolder: 'Select shader pause granularity mode', title: 'Pause Mode' })
 				if (typeof picked !== 'undefined') {
 					const single = picked == "Single"
 					await sess.customRequest('pauseMode', { single })
@@ -383,7 +536,9 @@ export function activate(context: vscode.ExtensionContext) {
 async function askForConnectionString() {
 	return await vscode.window.showInputBox({
 		placeHolder: 'Please enter the connection string',
-		value: DEFAULT_CONNECTION
+		value: DEFAULT_CONNECTION,
+		title: 'Connect to Deshader',
+		ignoreFocusOut: true,
 	})
 }
 
@@ -402,4 +557,47 @@ class InlineDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory 
 		// since DebugAdapterInlineImplementation is proposed API, a cast to <any> is required for now
 		return <any>new vscode.DebugAdapterInlineImplementation(new DebugSession(this.comm, this.outputChannel) as any as vscode.DebugAdapter)
 	}
+}
+
+async function getDeviceInfo() {
+	const parser = new UAParser(navigator.userAgent)
+	const parsedOS = parser.getOS().name
+	let os: 'linux' | 'macos' | 'windows' | undefined
+	let ext: `deb` | 'tar.zst' | 'zip' | undefined
+	let arch: '-arm64' | '' | '-x86_64' | '-x86' = ''
+	switch (parsedOS) {
+		case 'Linux':
+		case 'Chrome OS':
+			os = 'linux'
+			break
+		case 'Mac OS':
+			os = 'macos'
+			ext = 'zip'
+			const parsedArch = parser.getCPU().architecture
+			switch (parsedArch) {
+				case 'amd64':
+				case 'ia64':
+					arch = '-x86_64'
+					break
+				case 'arm':
+				case 'arm64':
+				case 'armhf':
+					arch = '-arm64'
+					break
+				case 'ia32':
+					arch = '-x86'
+					break
+			}
+			break
+	}
+	if (parsedOS?.includes('Windows')) os = 'windows'
+	if (!os) {
+		os = await vscode.window.showQuickPick(['linux', 'macos', 'windows'], {
+			ignoreFocusOut: true,
+			title: 'Select OS',
+			placeHolder: 'Select your OS'
+		}) as any
+		ext = 'zip'
+	}
+	return { os, ext, arch }
 }

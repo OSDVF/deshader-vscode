@@ -219,37 +219,43 @@
     "commands": [
       {
         "command": "deshader.connect",
-        "title": "Deshader: Connect",
+        "title": "Connect",
         "icon": "$(broadcast)",
         "category": "Deshader"
       },
       {
         "command": "deshader.disconnect",
-        "title": "Deshader: Disconnect",
+        "title": "Disconnect",
         "icon": "$(debug-disconnect)",
+        "category": "Deshader"
+      },
+      {
+        "command": "deshader.download",
+        "title": "Download Latest Library",
+        "icon": "$(cloud-download)",
         "category": "Deshader"
       },
       {
         "command": "deshader.newTerminal",
         "category": "Deshader",
-        "title": "Deshader: New Terminal",
+        "title": "New Terminal",
         "icon": "$(terminal)"
       },
       {
         "command": "deshader.addWorkspace",
-        "title": "Deshader: Add virtual shader workspace",
+        "title": "Add virtual shader workspace",
         "category": "Deshader",
         "icon": "$(file-directory)"
       },
       {
         "command": "deshader.pauseMode",
-        "title": "Deshader: Select thread pause mode",
+        "title": "Select thread pause mode",
         "category": "Deshader",
         "icon": "$(debug-coverage)"
       },
       {
         "command": "deshader.selectThread",
-        "title": "Deshader: Select shader thread",
+        "title": "Select shader thread",
         "category": "Deshader",
         "icon": "$(list-selection)"
       },
@@ -261,13 +267,13 @@
       },
       {
         "command": "deshader.window",
-        "title": "Deshader: Open virtual workspace as remote",
+        "title": "Open virtual workspace as remote",
         "category": "Deshader",
         "icon": "$(window)"
       },
       {
         "command": "deshader.newWindow",
-        "title": "Deshader: Open virtual workspace in new window",
+        "title": "Open virtual workspace in new window",
         "category": "Deshader",
         "icon": "$(window)"
       }
@@ -328,7 +334,7 @@
         "scheme": "vscode-remote",
         "authority": "deshader*",
         "formatting": {
-          "label": "deshader:/${path}",
+          "label": "${path}",
           "separator": "/",
           "tildify": true,
           "stripPathStartingSeparator": true,
@@ -376,7 +382,7 @@
       "properties": {
         "deshader.path": {
           "type": "string",
-          "description": "Path to the Deshader Library (system directories will be searched if empty; no effect in Deshader Editor)",
+          "markdownDescription": "Path to the Deshader Library (system directories will be searched if empty; no effect in Deshader Editor). [Download Deshader Library](command:deshader.download)",
           "default": ""
         },
         "deshader.launcher": {
@@ -404,15 +410,30 @@
           "description": "Number of retries for the communication with the Deshader Library",
           "default": 3
         },
-        "deshader.communicator.trace": {
-          "type": "boolean",
-          "description": "Trace the communication between Deshader Library and the extension",
-          "default": false
-        },
         "deshader.communicator.readyCheck": {
           "type": "number",
           "description": "Time in milliseconds between checks if the Deshader Library is ready",
           "default": 800
+        },
+        "deshader.tracing.enable": {
+          "type": "boolean",
+          "description": "Trace the communication between Deshader Library and the extension",
+          "default": false
+        },
+        "deshader.tracing.libraryLogs": {
+          "type": "boolean",
+          "description": "Show logs from the Deshader Library in the output channel",
+          "default": false
+        },
+        "deshader.tracing.stacks": {
+          "type": "boolean",
+          "description": "Show stack traces in the logs",
+          "default": false
+        },
+        "deshader.debugging.singleChunk": {
+          "type": "boolean",
+          "markdownDescription": "Collapse all shader strings (as provided to `glShaderSource`) into a single source code. Each string will form a separate shader \"chunk\" instead.",
+          "default": false
         }
       }
     },
@@ -428,8 +449,8 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile-prod",
-    "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process --define \"process=undefined\"",
-    "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\" --define \"process=undefined\"",
+    "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process --env=inline",
+    "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --env=inline --define \"process.env.NODE_DEBUG=undefined\"",
     "dev": "bun run compile-dev --watch",
     "postinstall": "if [ ! -f vscode.proposed.resolvers.d.ts ]; then bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts; fi",
     "lint": "eslint .",
@@ -437,17 +458,20 @@
   },
   "dependencies": {
     "@vscode/debugadapter": "^1.64.0",
-    "await-notify": "^1.0.1",
     "path-browserify": "^1.0.1",
+    "ua-parser-js": "^2.0.2",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.10.4",
+    "@types/node-fetch": "^2.6.12",
     "@types/path-browserify": "^1.0.3",
     "@types/vscode": "^1.91.1",
     "@typescript-eslint/eslint-plugin": "^8.12.2",
     "@typescript-eslint/parser": "^8.12.2",
     "eslint": "^9.13.0",
+    "node-fetch": "^3.3.2",
+    "process": "^0.11.10",
     "ts-loader": "^9.4.4",
     "typescript": "^5.2.2",
     "webpack": "^5.88.2",

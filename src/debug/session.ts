@@ -8,7 +8,6 @@ import {
     Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination
 } from '@vscode/debugadapter'
 import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent, DeshaderScheme } from '../deshader'
-import { Subject } from 'await-notify'
 import * as vscode from 'vscode'
 import { DebugSessionBase } from 'conditional-debug-session'
 import { basename, dirname, join } from 'path-browserify'
@@ -74,7 +73,6 @@ export class DebugSession extends DebugSessionBase {
     private _target: ReturnType<typeof child_process.spawn> | null = null
 
     private abortTarget = new AbortController();
-    private _configurationDone = new Subject();
     private _connected!: { resolve: () => void, reject: (reason?: any) => void }
 
     private _cancellationTokens = new Map<number, boolean>();
@@ -262,22 +260,6 @@ export class DebugSession extends DebugSessionBase {
         this.outputChannel?.appendLine("Processing pushed breakpoints")
         for (const bp of breakpoints) {
             this.sendEvent(new BreakpointEvent('new', this.convertDebuggerBreakpointToClient(bp)))
-        }
-    }
-
-    /**
-     * Called at the end of the configuration sequence.
-     * Indicates that all breakpoints etc. have been sent to the DA and that the 'launch' can start.
-     */
-    protected async configurationDoneRequest(response: DebugProtocol.ConfigurationDoneResponse, args: DebugProtocol.ConfigurationDoneArguments) {
-        try {
-            await this.connected
-            super.configurationDoneRequest(response, args)
-
-            // notify the launchRequest that configuration has finished
-            this._configurationDone.notify()
-        } catch (e) {
-            this.commError(response, e)
         }
     }
 

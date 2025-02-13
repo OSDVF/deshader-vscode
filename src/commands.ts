@@ -7,6 +7,7 @@ export default {
     connect: 'deshader.connect',
     connectLsp: 'deshader.connectLsp',
     disconnect: 'deshader.disconnect',
+    download: 'deshader.download',
     newTerminal: 'deshader.newTerminal',
     addWorkspace: 'deshader.addWorkspace',
     pauseMode: 'deshader.pauseMode',
