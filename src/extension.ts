@@ -4,7 +4,7 @@ import * as vscode from 'vscode'
 import { ProviderResult } from 'vscode'
 import { DebugSession, deshaderSessions } from './debug/session'
 import { DeshaderFilesystem } from './filesystem'
-import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, protocolToRaw, RunningShader, WebSocketContainer, WithColon } from './deshader'
+import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, toRawURL, RunningShader, WebSocketContainer, WithColon } from './deshader'
 import { deshaderTerminal, PROFILE } from './terminal'
 import { deshaderLanguageClient } from './language'
 import { unknownToString } from './format'
@@ -20,12 +20,13 @@ const DEFAULT_CONNECTION = 'deshaderws://127.0.0.1:8082'
 
 const SUPPORTS_REMOTE = 'registerRemoteAuthorityResolver' in vscode.workspace
 let webNoticeShown = false
-export function activate(context: vscode.ExtensionContext) {
+const parser = new UAParser(navigator.userAgent)
+const parsedOS = parser.getOS().name
+
+export async function activate(context: vscode.ExtensionContext) {
 	const output = vscode.window.createOutputChannel('Deshader')
 	const comm = new Communicator(output)
 	const fs = new DeshaderFilesystem(output, comm)
-	for (const s of DeshaderSchemes)
-		context.subscriptions.push(vscode.workspace.registerFileSystemProvider(s, fs, { isCaseSensitive: true, isReadonly: false }))
 	let remoteFilesystemProvidersRegistered = false
 	context.subscriptions.push(output)
 	context.subscriptions.push(comm)
@@ -44,6 +45,19 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	})
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
+	if (parsedOS === 'Mac OS') {
+		vscode.workspace.onDidChangeConfiguration(async e => {
+			if (e.affectsConfiguration('deshader')) {
+				const config = vscode.workspace.getConfiguration('deshader')
+				const p = config.get<string>('path', '')
+				if (p.endsWith('.app') || p.endsWith('.app/')) {
+					if (await vscode.window.showInformationMessage('The path to the Deshader Library ends with .app. Do you want to set it to standard library location within the application bundle?', 'Yes', 'No') === 'Yes') {
+						config.update('path', path.join(p, 'Contents/lib/libdeshader.dylib'))
+					}
+				}
+			}
+		})
+	}
 
 	const lspContainer = new WebSocketContainer()
 	context.subscriptions.push(lspContainer)
@@ -468,26 +482,37 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	// Automatically connect if running inside deshader-integrated vscode
-	if (typeof deshader !== 'undefined' && connPrompt == null) {
-		if (!deshader.commands) {
+	if (typeof deshader !== 'undefined') {
+		if (!deshader.commands && connPrompt == null) {
 			// suggest default connection :)
-			const url = new URL(DEFAULT_CONNECTION)
-			url.protocol = protocolToRaw(url.protocol as WithColon<DeshaderScheme>)
-			const ws = new WebSocket(url)
-			ws.onopen = async () => {
-				ws.close()
-				if (connPrompt != null) return
-				const response = await vscode.window.showInformationMessage('Deshader detected at the default connection (' + DEFAULT_CONNECTION + ')', 'Connect')
-				if (response) {
-					deshaderConnect(DEFAULT_CONNECTION)
+			const url = toRawURL(DEFAULT_CONNECTION)
+			const ws = new WebSocket(url.toString())
+			await new Promise<void>((resolve) => {
+				ws.onopen = async () => {
+					ws.close()
+					if (connPrompt != null) {
+						await connPrompt.finally()
+						if (comm.connectionState != ConnectionState.Disconnected) {
+							resolve()
+							return
+						}
+					}
+					const response = await vscode.window.showInformationMessage('Deshader detected at the default connection (' + DEFAULT_CONNECTION + ')', 'Connect')
+					if (response) {
+						await deshaderConnect(DEFAULT_CONNECTION).finally()
+					}
+					resolve()
 				}
-			}
+				ws.onerror = resolve as any
+			})
 		}
-		deshaderConnect(deshader.commands, deshader.lsp)
+		await deshaderConnect(deshader.commands, deshader.lsp).finally()
 	}
 
 	const languageClient = deshaderLanguageClient(lspContainer)
 	context.subscriptions.push(languageClient)
+	for (const s of DeshaderSchemes)
+		context.subscriptions.push(vscode.workspace.registerFileSystemProvider(s, fs, { isCaseSensitive: true, isReadonly: false }))
 
 	async function deshaderConnect(commURL?: string | URL | vscode.Uri, lspURL?: string | URL, openAfterConnect?: boolean) {
 		try {
@@ -498,7 +523,7 @@ export function activate(context: vscode.ExtensionContext) {
 				lspContainer.endpoint = lspURL
 			}
 			const config = vscode.workspace.getConfiguration('deshader')
-			if (openAfterConnect ?? config.get<boolean>('openAfterConnect', true)) {
+			if (commURL && (openAfterConnect ?? config.get<boolean>('openAfterConnect', true))) {
 				vscode.commands.executeCommand(Commands.addWorkspace)
 			}
 		} catch (e) {
@@ -560,8 +585,6 @@ class InlineDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory 
 }
 
 async function getDeviceInfo() {
-	const parser = new UAParser(navigator.userAgent)
-	const parsedOS = parser.getOS().name
 	let os: 'linux' | 'macos' | 'windows' | undefined
 	let ext: `deb` | 'tar.zst' | 'zip' | undefined
 	let arch: '-arm64' | '' | '-x86_64' | '-x86' = ''

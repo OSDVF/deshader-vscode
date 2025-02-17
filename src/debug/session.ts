@@ -417,14 +417,16 @@ export class DebugSession extends DebugSessionBase {
                     env: args.env,
                 })
                 const line = argv.join(' ')
-                vscode.window.onDidChangeTerminalShellIntegration(async ({ terminal, shellIntegration }) => {
+                const changeListener = vscode.window.onDidChangeTerminalShellIntegration(async ({ terminal, shellIntegration }) => {
                     if (terminal === terminal) {
                         const execution = shellIntegration.executeCommand(line)
-                        vscode.window.onDidEndTerminalShellExecution(event => {
+                        const endListener = vscode.window.onDidEndTerminalShellExecution(event => {
                             if (event.execution === execution) {
                                 this.outputChannel?.appendLine(`Command exited with code ${event.exitCode}`)
+                                endListener.dispose()
                             }
                         })
+                        changeListener.dispose()
                     }
                 })
                 // Fallback to sendText if there is no shell integration within 3 seconds of launching

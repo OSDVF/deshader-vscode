@@ -198,7 +198,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	static throwDeshaderError(e: string, uri: vscode.Uri): vscode.FileSystemError {
-		switch (e) {
+		switch (e.slice(0, e.indexOfOrNull(' ') ?? e.length)) {
 			case 'DirectoryNotFound':
 			case 'TargetNotFound':
 			case 'NotTagged':
@@ -289,11 +289,14 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		await this.checkConnection()
 
 		try {
-			await this.comm.rename({ from: oldUri.path, to: newUri.path })
+			const newPath = await this.comm.rename({ from: oldUri.path, to: newUri.path })
 
 			this._fireSoon(
 				{ type: vscode.FileChangeType.Deleted, uri: oldUri },
-				{ type: vscode.FileChangeType.Created, uri: newUri }
+				{ type: vscode.FileChangeType.Created, uri: vscode.Uri.from({
+					scheme: newUri.scheme,
+					path: newPath,
+				}) }
 			)
 		} catch (e) {
 			if (typeof e === 'string') {

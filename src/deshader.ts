@@ -118,9 +118,9 @@ type MessageCallback = (event: MessageEvent) => void
  */
 export class Communicator extends EventEmitter implements vscode.Disposable {
     output: vscode.OutputChannel
-    private endpoint: URL | null = null
     trace = false
     private impl: ICommunicatorImpl | null = null
+    private _endpoint: URL | null = null
     private _onConnected = new Set<VoidFunction>()
     private _onDisconnected = new Set<VoidFunction>()
     private _onMessage = new Set<MessageCallback>()
@@ -161,7 +161,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
      * Always returns a {@link URL} object with {@link RawScheme} as protocol.
      */
     get endpointURL(): URL | null {
-        return this.endpoint
+        return this._endpoint
     }
 
     /**
@@ -174,15 +174,14 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         if (typeof value === 'string') {
             const parsed = URL.parse(value)
             if (parsed) {
-                this.endpoint = parsed
+                this._endpoint = parsed
             } else {
                 throw URIError("Could not parse")
             }
         } else {
-            this.endpoint = value
+            this._endpoint = value
         }
-        this.endpoint.protocol = protocolToRaw(this.endpoint.protocol as WithColon<DeshaderOrRawScheme>)
-
+        this._endpoint = new URL(toRawURL(this._endpoint).toString())
         this.updateImpl()
     }
 
@@ -213,8 +212,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
             this._onConnected = this.impl.onConnected
             this._onDisconnected = this.impl.onDisconnected
         }
-        if (this.endpoint) {
-            const impl = protocolToImpl(this.endpoint.protocol as WithColon<RawScheme>)
+        if (this._endpoint) {
+            const impl = protocolToImpl(this._endpoint.protocol as WithColon<RawScheme>)
             this.impl = new impl(this, false)
             this.impl.onConnected = this._onConnected
             this.impl.onDisconnected = this._onDisconnected
@@ -253,7 +252,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
      * Get host name without port
      */
     getHost(): string | undefined {
-        return this.endpoint?.hostname
+        return this._endpoint?.hostname
     }
 
     disconnect(): void {
@@ -340,8 +339,11 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         await this.sendParametric('save', req, content, false)
     }
 
-    async rename(req: { from: string, to: string } & Seq): Promise<void> {
-        await this.sendParametric('rename', req)
+    /**
+     * @returns The new full path for the file
+     */
+    rename(req: { from: string, to: string } & Seq): Promise<string> {
+        return this.sendParametric('rename', req)
     }
 
     async untag(req: PathRequest): Promise<void> {
@@ -465,6 +467,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
 declare global {
     interface String {
         splitNoOrphans(separator: string | RegExp, limit?: number): string[]
+        indexOfOrNull(searchValue: string, fromIndex?: number): number | null
     }
 }
 
@@ -474,6 +477,11 @@ String.prototype.splitNoOrphans = function (separator: string | RegExp, limit?: 
         arr.pop()
     }
     return arr
+}
+
+String.prototype.indexOfOrNull = function (searchValue: string, fromIndex?: number): number | null {
+    const i = this.indexOf(searchValue, fromIndex)
+    return i == -1 ? null : i
 }
 
 export interface ICommunicatorImpl extends vscode.Disposable {
@@ -740,7 +748,7 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
                 }
             }
         }
-        return this.sendCommand(command, body, seq)
+        return this.sendCommand(command, body, seq, outputString)
     }
 
     shown = 0
@@ -817,20 +825,25 @@ export function normalizeScheme(scheme: DeshaderOrRawScheme): DeshaderScheme {
 }
 
 export type WithColon<T> = T extends string ? `${T}:` : never
-export function protocolToRaw(protocol: WithColon<DeshaderOrRawScheme>): WithColon<RawScheme> {
-    if (RawSchemes.includes(protocol.slice(0, protocol.length - 1) as RawScheme)) {
-        return protocol as WithColon<RawScheme>
-    } else switch (protocol) {
-        case 'deshader:':
-            return 'http:'
-        case 'deshaders:':
-            return 'https:'
-        case 'deshaderws:':
-            return 'ws:'
-        case 'deshaderwss:':
-            return 'wss:'
+export function toRawURL(url: vscode.Uri | URL | string): vscode.Uri {
+    const uri = url instanceof vscode.Uri ? url : vscode.Uri.parse(typeof url === 'string' ? url : url.toString())
+    if (RawSchemes.includes(uri.scheme as RawScheme)) {
+        return uri
+    } else return uri.with({scheme: toRawScheme(uri.scheme as DeshaderScheme)})
+}
+
+function toRawScheme(scheme: DeshaderScheme) : RawScheme {
+    switch (scheme) {
+        case 'deshader':
+            return 'http'
+        case 'deshaders':
+            return 'https'
+        case 'deshaderws':
+            return 'ws'
+        case 'deshaderwss':
+            return 'wss'
         default:
-            throw new Error(`Unknown protocol ${protocol}`)
+            throw new Error(`Unknown Deshader scheme ${scheme}`)
     }
 }
 
