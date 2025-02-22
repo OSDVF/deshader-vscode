@@ -1,6 +1,7 @@
 import * as path from 'path-browserify'
 import * as vscode from 'vscode'
 import { Communicator, ConnectionState, DeshaderScheme, isTagged } from './deshader'
+import Commands from './commands'
 
 const VFS_GUIDE = "https://github.com/OSDVF/deshader/blob/main/guide/Filesystem.md"
 
@@ -62,18 +63,21 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		this.output = output
 		this.comm = comm
 		this.vscodeVirtual = {// TODO write to a "defaults" file
-			"launch.json": (typeof deshader != 'undefined' && (comm.isConnected || deshader.commands)) ? JSON.stringify({
+			"launch.json": JSON.stringify({
 				configurations: [
 					{
 						name: "Deshader Integrated",
 						type: "deshader",
 						request: "attach",
-						connection: connection,
 						stopOnEntry: true
 					}
 				]
-			}) : undefined,
-			"settings.json": JSON.stringify({}),
+			}),
+			"settings.json": JSON.stringify({
+				"files.associations": {
+					"*.instrumented": "glsl",
+				}
+			}),
 			"extensions.json": JSON.stringify({
 				recommendations: ["osdvf.deshader", "filippofracascia.glsl-language-support"]
 			})
@@ -83,7 +87,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	private showingError = false
 	private lastCheck: Promise<void> | null = null
 	// Still suffers from "time-of-check to time-of-use" errors, but it's at least something
-	async checkConnection() {
+	async checkConnection(uri?: vscode.Uri) {
 		switch (this.comm.connectionState) {
 			// @ts-expect-error 
 			case ConnectionState.Connecting:
@@ -98,7 +102,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 				this.showingError = true
 				const hasEndpoint = this.comm.endpointURL != null
 				try {
-					const value = await vscode.window.showErrorMessage(`Not connected to Deshader` + (hasEndpoint ? `. Connect to ${this.comm.endpointURL}?` : ''), "Connect")
+					const value = await vscode.window.showErrorMessage('Connection lost.' + (hasEndpoint ? ` Reconnect to ${this.comm.endpointURL!.host}?` : ''), "Connect")
 					if (value) {
 						let resolve: VoidFunction | null = null
 						let reject: ErrorFunction | null = null
@@ -114,6 +118,10 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 						try {
 							if (hasEndpoint) {
 								await this.comm.ensureConnected()
+								// reopen the closed folder
+								if (uri && !vscode.workspace.workspaceFolders?.find(f => f.uri.authority == uri.authority)) {
+									await vscode.commands.executeCommand(Commands.addWorkspace)
+								}
 								if (resolve != null) (resolve as VoidFunction)()
 							} else {
 								await vscode.commands.executeCommand("deshader.connect")
@@ -136,7 +144,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
-		await this.checkConnection()
+		await this.checkConnection(uri)
 
 		const codeRoot = uri.path.indexOf("/.vscode")
 		if (codeRoot != -1) {
@@ -220,7 +228,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
-		await this.checkConnection()
+		await this.checkConnection(uri)
 
 		const codeRoot = uri.path.indexOf("/.vscode")
 		if (codeRoot != -1) {
@@ -244,7 +252,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	// --- manage file contents
 
 	async readFile(uri: vscode.Uri): Promise<Uint8Array> {
-		await this.checkConnection()
+		await this.checkConnection(uri)
 
 		const codeRoot = uri.path.indexOf("/.vscode")
 		if (codeRoot != -1) {
@@ -260,7 +268,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	}
 
 	async writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): Promise<void> {
-		await this.checkConnection()
+		await this.checkConnection(uri)
 
 		if (options.create) {
 			throw vscode.FileSystemError.Unavailable("Shaders need to be created in the host application")
@@ -286,17 +294,19 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		if (!isTagged(newUri.path)) {
 			throw vscode.FileSystemError.NoPermissions("Cannot rename to a non-tagged path. See " + VFS_GUIDE)
 		}
-		await this.checkConnection()
+		await this.checkConnection(oldUri)
 
 		try {
 			const newPath = await this.comm.rename({ from: oldUri.path, to: newUri.path })
 
 			this._fireSoon(
 				{ type: vscode.FileChangeType.Deleted, uri: oldUri },
-				{ type: vscode.FileChangeType.Created, uri: vscode.Uri.from({
-					scheme: newUri.scheme,
-					path: newPath,
-				}) }
+				{
+					type: vscode.FileChangeType.Created, uri: vscode.Uri.from({
+						scheme: newUri.scheme,
+						path: newPath,
+					})
+				}
 			)
 		} catch (e) {
 			if (typeof e === 'string') {
@@ -309,7 +319,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		if (!isTagged(uri.path)) {
 			throw vscode.FileSystemError.NoPermissions("Only tags can be deleted. Not real shaders or programs.")
 		}
-		await this.checkConnection()
+		await this.checkConnection(uri)
 		try {
 			await this.comm.untag({
 				path: uri.path
@@ -330,7 +340,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		if (!isTagged(uri.path)) {
 			throw vscode.FileSystemError.NoPermissions("Cannot make directory in a non-tagged path. See " + VFS_GUIDE)
 		}
-		await this.checkConnection()
+		await this.checkConnection(uri)
 		try {
 			await this.comm.mkdir({
 				path: uri.path

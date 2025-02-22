@@ -7,7 +7,7 @@ import {
     ProgressStartEvent, ProgressUpdateEvent, ProgressEndEvent, InvalidatedEvent,
     Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination
 } from '@vscode/debugadapter'
-import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent, DeshaderScheme } from '../deshader'
+import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent, DeshaderScheme, toRawURL, DeshaderOrRawScheme } from '../deshader'
 import * as vscode from 'vscode'
 import { DebugSessionBase } from 'conditional-debug-session'
 import { basename, dirname, join } from 'path-browserify'
@@ -50,7 +50,7 @@ export class DebugSession extends DebugSessionBase {
      * Connection string that will be used when no connection is specified
      */
     static TYPE: 'deshader' = 'deshader'
-    public static DEFAULT_CONNECTION = "ws://127.0.0.1:8082";
+    public static DEFAULT_CONNECTION = "deshaderws://127.0.0.1:8082";
     public static DEFAULT_LIBRARY_PATH = isWindows ? "deshader.dll" : navigator.userAgent.includes('Mac') ? "libdeshader.dylib" : "libdeshader.so"
     public static DEFAULT_LAUNCHER_PATH = "deshader-run"
     private static _INSERT_LIBRARY_ENV = isWindows ? "PATH" : navigator.userAgent.includes('Mac') ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD"
@@ -97,12 +97,8 @@ export class DebugSession extends DebugSessionBase {
             this._connected = { resolve: res, reject: rej }
         })
 
-        // this debugger uses zero-based lines and columns
-        if (this instanceof LoggingDebugSession) {
-            this.setDebuggerLinesStartAt1(false)
-            this.setDebuggerColumnsStartAt1(false)
-
-        }
+        this.setDebuggerLinesStartAt1(false)
+        this.setDebuggerColumnsStartAt1(false)
         this.setupEvents()
         this.setDebuggerPathFormat('deshader') // Everything other that 'path' is considered as an URI
     }
@@ -247,6 +243,7 @@ export class DebugSession extends DebugSessionBase {
         response.body.supportsGotoTargetsRequest = false
         response.body.supportsHitConditionalBreakpoints = true
         response.body.supportsLogPoints = true
+        response.body.supportsANSIStyling = true
 
         this.sendResponse(response)
 
@@ -333,21 +330,29 @@ export class DebugSession extends DebugSessionBase {
     }
 
     private async connectionConsistency(args: AttachArguments) {
-        if (!args.connection) {
-            args.connection = DebugSession.DEFAULT_CONNECTION
-        }
-        const parsed = new URL(args.connection)
-        if (this._comm.endpointURL) {
-            if (parsed.toString() != this._comm.endpointURL.toString()) {
-                const choice = await vscode.window.showInformationMessage(`The connection URL ${args.connection} does not match already opened connection ${this._comm.endpointURL}`, {
-                    modal: true,
-                }, "Use current connection", "Use new connection")
-                if (choice == "Use new connection") {
-                    this._comm.endpointURL = parsed
+        if (args.connection) {
+            const raw = toRawURL(args.connection).toString()
+            if (this._comm.endpointURL) {
+                if (raw != this._comm.endpointURL.toString()) {
+                    const choice = await vscode.window.showInformationMessage(`The connection URL ${args.connection} does not match already opened connection ${this._comm.endpointURL}`, {
+                        modal: true,
+                    }, "Use current connection", "Use new connection")
+                    if (choice == "Use new connection") {
+                        this._comm.endpointURL = raw
+                        args.connection = raw
+                    }
                 }
+            } else {
+                this._comm.endpointURL = raw
+                args.connection = raw
             }
         } else {
-            this._comm.endpointURL = parsed
+            const u = this._comm.endpointURL
+            if (u) args.connection = u.toString()
+            else {
+                args.connection = DebugSession.DEFAULT_CONNECTION
+                this._comm.endpointURL = args.connection
+            }
         }
     }
 
@@ -586,7 +591,7 @@ export class DebugSession extends DebugSessionBase {
         try {
             await this.connected
 
-            const path = this.sourceToPath(args.source)
+            const path = await this.sourceToPath(args.source)
             const breakpoints = await this._comm.setBreakpoints({ path, breakpoints: args.breakpoints?.map(bp => this.convertClientBreakpointToDebugger(bp)), seq: response.request_seq })
 
             // send back the actual breakpoint positions
@@ -610,7 +615,7 @@ export class DebugSession extends DebugSessionBase {
             if (args.endColumn) { args.column = this.convertClientColumnToDebugger(args.endColumn) }
 
             const newArgs = {
-                path: this.sourceToPath(args.source),
+                path: await this.sourceToPath(args.source),
                 ...args,
                 seq: response.request_seq
             }
@@ -930,19 +935,24 @@ export class DebugSession extends DebugSessionBase {
 
     // debugger paths do not include deshader: scheme
     private pathToSource(path: string): Source {
+        const u = this._comm.endpointURL
+        if (u == null) {
+            throw new Error("Missing Deshader endpoint")
+        }
+
         return new Source(basename(path),
             // path contains leading slash
-            `deshader:${path}`,
+            `${this._comm.scheme}://${u.host}${path}`,
         )
     }
 
     // debugger paths do not include deshader: scheme
-    private sourceToPath(source: DebugProtocol.Source): string {
+    private async sourceToPath(source: DebugProtocol.Source): Promise<string> {
         if (source.path) {
             const parsed = vscode.Uri.parse(source.path)// assumes one leading slash after protocol
             return parsed.path
         } else {
-            return `/untagged/${source.sourceReference!}`
+            return await this._comm.readLink({ path: `/hash/${source.sourceReference}` })
         }
     }
 }

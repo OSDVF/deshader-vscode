@@ -25,10 +25,18 @@ const parsedOS = parser.getOS().name
 
 export async function activate(context: vscode.ExtensionContext) {
 	const output = vscode.window.createOutputChannel('Deshader')
+	context.subscriptions.push(output)
+	context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(e => {
+		for (const editor of e) {
+			if (editor.document.uri.path.startsWith('extension-output-osdvf.deshader')) {
+				// TODO text decorations
+			}
+		}
+	}))
+
 	const comm = new Communicator(output)
 	const fs = new DeshaderFilesystem(output, comm)
 	let remoteFilesystemProvidersRegistered = false
-	context.subscriptions.push(output)
 	context.subscriptions.push(comm)
 	if (SUPPORTS_REMOTE) {
 		const resolver = new DeshaderRemoteResolver(comm)
@@ -39,11 +47,11 @@ export async function activate(context: vscode.ExtensionContext) {
 			registerRemoteFileProvider(f)
 		}
 	}
-	vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders((e) => {
 		for (const a of e.added) {
 			registerRemoteFileProvider(a)
 		}
-	})
+	}))
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
 	if (parsedOS === 'Mac OS') {
 		vscode.workspace.onDidChangeConfiguration(async e => {
@@ -101,7 +109,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		const u = comm.endpointURL
 		if (u) {
 			connectionStatusItem.text = "$(extension-deshader) " + u.host
-			connectionStatusItem.tooltip = `Deshader connected (${u.protocol.substring(0, u.protocol.length - 1)}). Click to disconnect.`
+			connectionStatusItem.tooltip = `Deshader connected (${comm.scheme}). Click to disconnect.`
 			connectionStatusItem.command = Commands.disconnect
 
 			// check if we are already debugging on the Deshader side
@@ -142,7 +150,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				return connPrompt
 			}
 			connPrompt = (async () => {
-				const [input, force]: [string | undefined, boolean | undefined] = Array.isArray(args) ? args as any : [args, false]
+				const [input, force]: [string | undefined, boolean | undefined] = Array.isArray(args) ? args as any : [args, undefined]
 
 				if (comm.isConnected && warnAlreadyConnected) {
 					const response = await vscode.window.showWarningMessage('Deshader is already connected. Do you want to reconnect?', 'Yes', 'No', 'Never ask again')
@@ -415,10 +423,8 @@ export async function activate(context: vscode.ExtensionContext) {
 				const e = vscode.window.activeTextEditor
 				if (e && !e.document.uri.path.endsWith('.instrumented')) {
 					const u = e.document.uri
-					const deshaderPath = DeshaderSchemesAndRaw.includes(u.scheme as DeshaderScheme) ? u.path : await comm.translatePath({ path: u.path })
-					vscode.workspace.openTextDocument(u.with({
-						scheme: u.scheme,
-						path: deshaderPath + '.instrumented'
+					vscode.window.showTextDocument(u.with({
+						path: u.path + '.instrumented'
 					}))
 				} else {
 					vscode.window.showErrorMessage('No active text editor')

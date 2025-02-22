@@ -112,6 +112,9 @@ export type Body = string | ArrayBufferLike | Blob | ArrayBufferView
 export type SaveRequest = PathRequest & { compile: boolean, link: boolean }
 type MessageCallback = (event: MessageEvent) => void
 
+const ANSI_ESCAPE_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
+const BINARY_NOTICE = '[binary data]'
+
 /**
  * Communicates through WS or HTTP with a running Deshader instance
  * Proxies both the virtual file system and the debugger
@@ -121,6 +124,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     trace = false
     private impl: ICommunicatorImpl | null = null
     private _endpoint: URL | null = null
+    private _scheme: DeshaderOrRawScheme = 'deshader'
     private _onConnected = new Set<VoidFunction>()
     private _onDisconnected = new Set<VoidFunction>()
     private _onMessage = new Set<MessageCallback>()
@@ -152,7 +156,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         this._settings.logIntoResponses = this.trace && tracing.get<boolean>('libraryLogs', false)
         this._settings.singleChunkShader = debugging.get<boolean>('singleChunk', true)
 
-        if(this.isConnected) {
+        if (this.isConnected) {
             this.settings(this._settings)
         }
     }
@@ -168,21 +172,14 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
      * Accepts {@link RawScheme} or {@link DeshaderScheme} in the form of a {@link string}, {@link URL} or {@link vscode.Uri}.
      */
     set endpointURL(value: string | URL | vscode.Uri) {
-        if (value instanceof vscode.Uri) {
-            value = value.toString()
+        value = value instanceof vscode.Uri ? value : vscode.Uri.parse(value.toString())
+        const raw = toRawURL(value)
+        const rawString = raw.toString()
+        if (this._endpoint == null || rawString.startsWith(this._endpoint.origin)) {
+            this._scheme = value.scheme as DeshaderOrRawScheme
+            this._endpoint = new URL(rawString)
+            this.updateImpl()
         }
-        if (typeof value === 'string') {
-            const parsed = URL.parse(value)
-            if (parsed) {
-                this._endpoint = parsed
-            } else {
-                throw URIError("Could not parse")
-            }
-        } else {
-            this._endpoint = value
-        }
-        this._endpoint = new URL(toRawURL(this._endpoint).toString())
-        this.updateImpl()
     }
 
     get onConnected() {
@@ -201,7 +198,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         return this._onMessage
     }
     get scheme() {
-        return this.impl?.scheme
+        return this._scheme
     }
 
     shown = 0
@@ -244,7 +241,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     onceJson<T extends keyof typeof Events>(eventName: (typeof Events)[T], listener: (arg: EventArgs[T]) => void): this {
         return super.once(eventName, (data) => listener(JSON.parse(data)))
     }
-    emit<T extends keyof typeof Events>(eventName: (typeof Events)[T], arg?: string | Event): boolean {
+    emit<T extends keyof typeof Events>(eventName: (typeof Events)[T], arg?: string | Blob | Event): boolean {
         return super.emit(eventName, arg)
     }
 
@@ -325,6 +322,9 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
     async readFile(req: PathRequest): Promise<Blob> {
         return this.sendParametric('readFile', req, undefined, false)
+    }
+    readLink(_: PathRequest): Promise<string> {
+        throw new Error("Method not implemented.")
     }
     async savePhysical(req: SaveRequest, content: Body): Promise<void> {
         await this.sendParametric('savePhysical', req, content)
@@ -677,41 +677,44 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
     async open() {
         await super.open()
         this.connected.then(() => this.comm.emit(Events.connected))
-        this.ws!.addEventListener('message', (event: MessageEvent<Blob | string>) => {
+        this.ws!.addEventListener('message', async (event: MessageEvent<Blob | string>) => {
             // TODO: do not toString
-            const asString = event.data.toString()
-            const responseLines: string[] = splitStringToNParts(asString, '\n', 3)//0: status, 1: echoed command / seq, 2: body
-            if (responseLines[0].startsWith('600')) {// event (pushed by Deshader library)
-                this.comm.emit(Events[responseLines[1]], responseLines[2])
+            const responseLines: Blob[] = await splitBlob(event.data instanceof Blob ? event.data : new Blob([event.data], { type: 'text/plain' }), '\n'.charCodeAt(0), 3)//0: status, 1: echoed command / seq, 2: body
+            const code = await responseLines[0].text()
+            const messCommand = await responseLines[1].text()
+            if (code.startsWith('600')) {// event (pushed by Deshader library)
+                this.comm.emit(Events[messCommand], responseLines[2])
                 if (this.comm.trace)
-                    this.comm.output.appendLine(asString)
+                {
+                    this.comm.output.appendLine(code)
+                    this.comm.output.appendLine(messCommand)
+                    responseLines[2].text().then(text => this.comm.output.appendLine(text.replace(ANSI_ESCAPE_REGEX, '')))
+                }
             }
             else {
                 let found = false
                 for (let [command, actions] of Object.entries(this.pendingRequests)) {
-                    if (responseLines.length > 1 && responseLines[1] == command) {
+                    if (responseLines.length > 1 && messCommand == command) {
                         if (this.comm.trace) {
-                            this.comm.output.appendLine(responseLines[0])
-                            this.comm.output.appendLine(actions.name ?? responseLines[1])
-                            this.comm.output.appendLine(responseLines[2])
+                            this.comm.output.appendLine(code)
+                            this.comm.output.appendLine(actions.name ?? messCommand)
+                            const body = event.data instanceof Blob ? BINARY_NOTICE : await responseLines[2].text().then(text => text.replace(ANSI_ESCAPE_REGEX, ''))
+                            this.comm.output.appendLine(body)
+                            this.comm.emit(Events.message, body)
                         }
                         found = true
 
-                        const resp = responseLines[2]
-                        if (this.comm.trace) {
-                            this.comm.emit(Events.message, resp)
+                        if (code.startsWith('202')) {// success
+                            actions.resolve(responseLines[2])
                         }
-                        if (responseLines[0].startsWith('202')) {// success
-                            actions.resolve(event.data.slice(responseLines.slice(0, 2).reduceRight((acc, cur) => acc + cur.length + 1, 0)))
-                        }
-                        else if (responseLines[0].startsWith('500')) {// error
-                            actions.reject(responseLines[2].slice(6))// skip "error." prefix
+                        else if (code.startsWith('500')) {// error
+                            actions.reject(typeof event.data == 'string' ? await responseLines[2].slice(6).text() : BINARY_NOTICE)// skip "error." prefix
                         } else {
-                            actions.reject(resp)
+                            actions.reject(code)
                         }
                     }
                 }
-                if (!found) { this.comm.output.appendLine("Could not process: " + event.data) }
+                if (!found) { this.comm.output.appendLine("Could not process: " + (typeof event.data === 'string' ? event.data : BINARY_NOTICE)) }
             }
         })
         this.ws!.addEventListener('error', (event) => {
@@ -829,10 +832,10 @@ export function toRawURL(url: vscode.Uri | URL | string): vscode.Uri {
     const uri = url instanceof vscode.Uri ? url : vscode.Uri.parse(typeof url === 'string' ? url : url.toString())
     if (RawSchemes.includes(uri.scheme as RawScheme)) {
         return uri
-    } else return uri.with({scheme: toRawScheme(uri.scheme as DeshaderScheme)})
+    } else return uri.with({ scheme: toRawScheme(uri.scheme as DeshaderScheme) })
 }
 
-function toRawScheme(scheme: DeshaderScheme) : RawScheme {
+function toRawScheme(scheme: DeshaderScheme): RawScheme {
     switch (scheme) {
         case 'deshader':
             return 'http'
@@ -858,27 +861,23 @@ function protocolToImpl(protocol: WithColon<RawScheme>): new (comm: Communicator
 }
 
 
-function splitStringToNParts(str: string, separator: string, n: number) {
-    let parts: string[] = []
-    let temp = ''
-    let count = 0
+async function splitBlob(str: Blob, separator: number, n: number, chunk = 500) {
+    let parts: Blob[] = []
 
-    for (let i = 0; i < str.length; i++) {
-        if (str.substring(i, i + separator.length) === separator) {
-            if (count < n - 1) {
-                parts.push(temp)
-                temp = ''
-                count++
-                i += separator.length - 1
-            } else {
-                temp += str[i]
+    let last = 0
+    for (let i = 0; i < str.size; i += chunk) {
+        const start = i * chunk
+        const part = await str.slice(start, (i + 1) * chunk).bytes()
+        for (let x = 0; x < part.length; x++) {
+            if (part[x] == separator) {
+                parts.push(str.slice(last, start + x, str.type))
+                last = start + x + 1
+                if (parts.length == n - 1){
+                    parts.push(str.slice(last, str.size, str.type))
+                }
             }
-        } else {
-            temp += str[i]
         }
     }
-
-    parts.push(temp)
 
     return parts
 }

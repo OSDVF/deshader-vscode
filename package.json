@@ -283,7 +283,7 @@
         {
           "command": "deshader.showInstrumented",
           "group": "navigation",
-          "when": "resourceLangId == glsl && debugType == deshader"
+          "when": "resourceLangId == glsl && debugType == deshader && resourceExtname != .instrumented"
         }
       ],
       "editor/context": [
@@ -457,7 +457,7 @@
     "lintfix": "eslint . --fix"
   },
   "dependencies": {
-    "@vscode/debugadapter": "^1.64.0",
+    "@vscode/debugadapter": "^1.68.0",
     "path-browserify": "^1.0.1",
     "ua-parser-js": "^2.0.2",
     "vscode-languageclient": "^9.0.1"
