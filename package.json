@@ -428,8 +428,8 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile-prod",
-    "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process",
-    "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\"",
+    "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process --define \"process=undefined\"",
+    "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --define \"process.env.NODE_DEBUG=undefined\" --define \"process=undefined\"",
     "dev": "bun run compile-dev --watch",
     "postinstall": "bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts",
     "lint": "eslint .",
@@ -448,7 +448,6 @@
     "@typescript-eslint/eslint-plugin": "^8.12.2",
     "@typescript-eslint/parser": "^8.12.2",
     "eslint": "^9.13.0",
-    "process": "^0.11.10",
     "ts-loader": "^9.4.4",
     "typescript": "^5.2.2",
     "webpack": "^5.88.2",
