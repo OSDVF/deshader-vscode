@@ -452,7 +452,7 @@
     "compile-dev": "bun build src/extension.ts --outdir dist --sourcemap=linked --external vscode --format cjs --target browser --drop=process --env=inline",
     "compile-prod": "bun build src/extension.ts --outdir dist --sourcemap=external --external vscode --format cjs --target browser --drop=process --minify --env=inline --define \"process.env.NODE_DEBUG=undefined\"",
     "dev": "bun run compile-dev --watch",
-    "postinstall": "if [ ! -f vscode.proposed.resolvers.d.ts ]; then bunx download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts; fi",
+    "postinstall": "bun -e '(await Bun.file(`vscode.proposed.resolvers.d.ts`).exists()) || await Bun.$`bun x download-cli -o . https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vscode-dts/vscode.proposed.resolvers.d.ts`'",
     "lint": "eslint .",
     "lintfix": "eslint . --fix"
   },
