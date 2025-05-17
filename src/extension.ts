@@ -1,5 +1,3 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode'
 import { ProviderResult } from 'vscode'
 import { DebugSession, deshaderSessions } from './debug/session'
@@ -36,7 +34,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	const comm = new Communicator(output)
 	const fs = new DeshaderFilesystem(output, comm)
-	let remoteFilesystemProvidersRegistered = false
+	let remoteFilesystemProvider: null | vscode.Disposable = null
 	context.subscriptions.push(comm)
 	if (SUPPORTS_REMOTE) {
 		const resolver = new DeshaderRemoteResolver(comm)
@@ -47,9 +45,15 @@ export async function activate(context: vscode.ExtensionContext) {
 			registerRemoteFileProvider(f)
 		}
 	}
-	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(async (e) => {
 		for (const a of e.added) {
 			registerRemoteFileProvider(a)
+		}
+		for (const r of e.removed) {
+			if (remoteFilesystemProvider && r.uri.authority.startsWith('deshader')) {
+				await callOrAwait(remoteFilesystemProvider.dispose)
+				remoteFilesystemProvider = null
+			}
 		}
 	}))
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
@@ -539,9 +543,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	}
 
 	function registerRemoteFileProvider(f: vscode.WorkspaceFolder) {
-		if (!remoteFilesystemProvidersRegistered && f.uri.scheme === 'vscode-remote' && f.uri.authority.startsWith('deshader')) {
-			remoteFilesystemProvidersRegistered = true
-			context.subscriptions.push(vscode.workspace.registerFileSystemProvider('vscode-remote', fs, { isCaseSensitive: true, isReadonly: false }))
+		if (!remoteFilesystemProvider && f.uri.scheme === 'vscode-remote' && f.uri.authority.startsWith('deshader')) {
+			remoteFilesystemProvider = vscode.workspace.registerFileSystemProvider('vscode-remote', fs, { isCaseSensitive: true, isReadonly: false })
+			context.subscriptions.push(remoteFilesystemProvider)
 		}
 	}
 	async function openRemoteWindow(resuseWindow: boolean) {
@@ -629,4 +633,9 @@ async function getDeviceInfo() {
 		ext = 'zip'
 	}
 	return { os, ext, arch }
+}
+
+async function callOrAwait<T, U extends unknown[]>(f: () => T | Promise<T>, ...a: U): Promise<T> {
+	const r = f()
+	return r instanceof Promise ? r.then(r => r) : r
 }

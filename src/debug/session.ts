@@ -107,11 +107,11 @@ export class DebugSession extends DebugSessionBase {
         // setup event handlers
         this._comm.onJson<'stop'>(Events.stop, params => {
             if (params.step == 0) {
-                this.sendEvent(new StoppedEvent('entry', params.shader))
-            } else { this.sendEvent(new StoppedEvent('step', params.shader)) }
+                this.sendEvent(new StoppedEvent('entry', params.thread))
+            } else { this.sendEvent(new StoppedEvent('step', params.thread)) }
         })
         this._comm.onJson<'stopOnBreakpoint'>(Events.stopOnBreakpoint, (params) => {
-            this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.shader, hitBreakpointIds: params.ids })))
+            this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.thread, hitBreakpointIds: params.ids })))
         })
         this._comm.onJson<'stopOnDataBreakpoint'>(Events.stopOnDataBreakpoint, (threadID) => {
             this.sendEvent(new StoppedEvent('data breakpoint', threadID))
@@ -265,6 +265,10 @@ export class DebugSession extends DebugSessionBase {
             await this.connected
 
             console.log(`disconnectRequest suspend: ${args.suspendDebuggee}, terminate: ${args.terminateDebuggee}`)
+
+            if(args.terminateDebuggee || await this.shouldStop((response.request_seq))) {
+                await this._comm.noDebug({seq: response.request_seq + 1});
+            }
             super.disconnectRequest(response, args)
         } catch (e) {
             this.commError(response, e)
@@ -620,9 +624,9 @@ export class DebugSession extends DebugSessionBase {
                 seq: response.request_seq
             }
             delete (<any>newArgs).source
-            const bps = await this._comm.possibleBreakpoints(newArgs)
+            const deshaderResponse = await this._comm.possibleBreakpoints(newArgs)
             response.body = {
-                breakpoints: bps.map(bp => this.convertDebuggerBreakpointToClient(bp))
+                breakpoints: deshaderResponse.breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
             }
 
             this.sendResponse(response)
@@ -954,5 +958,22 @@ export class DebugSession extends DebugSessionBase {
         } else {
             return await this._comm.readLink({ path: `/hash/${source.sourceReference}` })
         }
+    }
+
+    /**
+     * @returns The number of clients connected to the server or a dummy value if the connection is not established
+     */
+    private async shouldStop(seq: number) {
+        const config = vscode.workspace.getConfiguration('deshader.debugging')
+
+        if(config.get<boolean>('stopOnDisconnect', true)) {
+            try {
+                const clients = await this._comm.clients({seq});
+                return clients.length;
+            } catch (_) {
+                return 1;
+            }
+        }
+        return 0
     }
 }

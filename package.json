@@ -434,6 +434,11 @@
           "type": "boolean",
           "markdownDescription": "Collapse all shader strings (as provided to `glShaderSource`) into a single source code. Each string will form a separate shader \"chunk\" instead.",
           "default": false
+        },
+        "deshader.debugging.stopOnDisconnect": {
+          "type": "boolean",
+          "description": "Revert instrumented code and stop debugging when disconnecting from the target",
+          "default": true
         }
       }
     },

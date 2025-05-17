@@ -36,12 +36,15 @@ export type EventArgs = {
     close: CloseEvent,
     invalidated: DebugProtocol.InvalidatedEvent['body']
     stop: {
+        /** Step ID within the source file. Not used by the debug adapter */
         step: number,
-        shader: number,
+        /** Running shader ID */
+        thread: number,
     },
     stopOnBreakpoint: {
-        ids: number[],//breakpoint ids list,
-        shader: number,
+        ids: number[],//breakpoint IDs list,
+        // Running shader ID
+        thread: number,
     },
     stopOnDataBreakpoint: number,
     stopOnFunction: String,
@@ -50,6 +53,7 @@ export type EventArgs = {
     output: ["prio" | "out" | "err", DebugProtocol.OutputEvent['body']['group'], string, number, number]
     end: undefined
 }
+/** Identifies a single running shader "thread" and some meta information about the shader */
 export type RunningShader = {
     id: number,
     name: string,
@@ -96,6 +100,8 @@ export type BreakpointEvent = {
     reason: 'changed' | 'new' | 'removed' | string
     breakpoint: Breakpoint
 }
+export type PossibleBreakpoints = { breakpoints: BreakpointLocation[] }
+
 export type StackFrame = SourceToPath<DebugProtocol.StackFrame>
 export type StackTraceResponse = {
     stackFrames: StackFrame[],
@@ -367,6 +373,10 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         return this.sendParametric('translatePath', req)
     }
 
+    async clients(req?: Seq): Promise<string[]> {
+        return (await this.sendParametric('clients', req)).splitNoOrphans('\n')
+    }
+
     //
     // Debugging functions
     //
@@ -399,8 +409,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     async pauseMode(args: { single: boolean } & Seq): Promise<void> {
         await this.sendParametric('pauseMode', args)
     }
-    possibleBreakpoints(args: BreakpointLocation & Seq): Promise<BreakpointLocation[]> {
-        return this.sendParametricJson<BreakpointLocation[]>('possibleBreakpoints', args)
+    possibleBreakpoints(args: BreakpointLocation & Seq): Promise<PossibleBreakpoints> {
+        return this.sendParametricJson<PossibleBreakpoints>('possibleBreakpoints', args)
     }
     async selectThread(args: { shader: number, thread: number[], group?: number[] } & Seq): Promise<void> {
         await this.sendParametric('selectThread', args)
@@ -683,12 +693,12 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
             const code = await responseLines[0].text()
             const messCommand = await responseLines[1].text()
             if (code.startsWith('600')) {// event (pushed by Deshader library)
-                this.comm.emit(Events[messCommand], responseLines[2])
-                if (this.comm.trace)
-                {
+                const text = await responseLines[2].text()// TODO how to handle non-text events?
+                this.comm.emit(Events[messCommand], text)
+                if (this.comm.trace) {
                     this.comm.output.appendLine(code)
                     this.comm.output.appendLine(messCommand)
-                    responseLines[2].text().then(text => this.comm.output.appendLine(text.replace(ANSI_ESCAPE_REGEX, '')))
+                    this.comm.output.appendLine(text.replace(ANSI_ESCAPE_REGEX, ''))
                 }
             }
             else {
@@ -872,7 +882,7 @@ async function splitBlob(str: Blob, separator: number, n: number, chunk = 500) {
             if (part[x] == separator) {
                 parts.push(str.slice(last, start + x, str.type))
                 last = start + x + 1
-                if (parts.length == n - 1){
+                if (parts.length == n - 1) {
                     parts.push(str.slice(last, str.size, str.type))
                 }
             }
