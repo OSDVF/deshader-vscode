@@ -55,6 +55,7 @@ export type EventArgs = {
 }
 /** Identifies a single running shader "thread" and some meta information about the shader */
 export type RunningShader = {
+    /// DAP "threadId", Deshader "RunningShader.Locator.impl"
     id: number,
     name: string,
     groupCount?: number[],

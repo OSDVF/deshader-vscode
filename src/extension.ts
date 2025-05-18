@@ -48,6 +48,15 @@ export async function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(async (e) => {
 		for (const a of e.added) {
 			registerRemoteFileProvider(a)
+			if(a.uri.scheme.startsWith('deshader') || a.uri.authority.startsWith('deshader')) {
+				// check if we are already debugging on the Deshader side
+				const commState = await comm.state({})
+				if (commState.debugging && deshaderSessions.size == 0) {
+					if(await vscode.window.showInformationMessage('Target program is already in debugging state. Do you want to attach a debug session to it?', 'Yes')) {
+						vscode.debug.startDebugging(a, "Deshader Integrated")
+					}
+				}
+			}
 		}
 		for (const r of e.removed) {
 			if (remoteFilesystemProvider && r.uri.authority.startsWith('deshader')) {
@@ -115,12 +124,6 @@ export async function activate(context: vscode.ExtensionContext) {
 			connectionStatusItem.text = "$(extension-deshader) " + u.host
 			connectionStatusItem.tooltip = `Deshader connected (${comm.scheme}). Click to disconnect.`
 			connectionStatusItem.command = Commands.disconnect
-
-			// check if we are already debugging on the Deshader side
-			const commState = await comm.state({})
-			if (commState.debugging && deshaderSessions.size == 0) {
-				vscode.debug.startDebugging(undefined, "Deshader Integrated")
-			}
 		}
 	})
 
@@ -479,6 +482,9 @@ export async function activate(context: vscode.ExtensionContext) {
 				e.session.customRequest('updateStackItem', e)
 				threadStatusItem.show()
 				const currentShader = await e.session.customRequest('getCurrentShader') as RunningShader
+				if(!currentShader) {
+					threadStatusItem.hide()
+				}
 				if (currentShader.selectedGroup) {
 					threadStatusItem.text = `$(pulse) (${currentShader.selectedGroup.join(',')})(${currentShader.selectedThread.join(',')})`
 				} else {

@@ -341,7 +341,7 @@ export class DebugSession extends DebugSessionBase {
         this.singlePauseMode = state.singlePauseMode
         this.processPushedBreakpoints(state.breakpoints)
         if (state.paused) {
-            this.sendEvent(new StoppedEvent('entry'))
+            this.sendEvent(new StoppedEvent('entry', state.runningShaders.find(_ => true)?.id))
         }
     }
 
@@ -613,7 +613,7 @@ export class DebugSession extends DebugSessionBase {
 
             this.sendResponse(response)
             this._connected.resolve()
-            setTimeout(()=>this.initialState(), 1000)
+            setTimeout(() => this.initialState(), 1000)
         } catch (e) {
             this.commError(response, e, "Failed to launch: ")
             this._connected.reject(e)
@@ -635,7 +635,7 @@ export class DebugSession extends DebugSessionBase {
         try {
             await this.connected
 
-            await this._comm.pause({...args, seq: response.request_seq})
+            await this._comm.pause({ ...args, seq: response.request_seq })
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
