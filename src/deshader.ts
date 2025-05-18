@@ -393,8 +393,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
 
     // get current debugger state (because the session could be started from other client than this vscode instance)
-    async state(req: Seq): Promise<State> {
-        return this.sendParametricJson<State>('state', req)
+    async state(req?: Seq): Promise<State> {
+        return this.sendParametricJson<State>('state', req ?? {})
     }
 
     setFunctionBreakpoint(breakpoint: DebugProtocol.FunctionBreakpoint & Seq): Promise<Breakpoint> {
@@ -405,6 +405,9 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
     async clearBreakpoints(req: PathRequest): Promise<void> {
         await this.sendParametric('clearBreakpoints', req)
+    }
+    async pause(req: DebugProtocol.PauseArguments & Seq): Promise<void> {
+        await this.sendParametric('pause', req)
     }
     async pauseMode(args: { single: boolean } & Seq): Promise<void> {
         await this.sendParametric('pauseMode', args)
@@ -423,6 +426,9 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
     readMemory(request: DebugProtocol.ReadMemoryArguments & Seq): Promise<DebugProtocol.ReadMemoryResponse['body']> {
         return this.sendParametricJson<DebugProtocol.ReadMemoryResponse['body']>('readMemory', request)
+    }
+    async restart(args: DebugProtocol.RestartArguments & Seq): Promise<void> {
+        await this.sendParametric('restart', args)
     }
     variables(args: DebugProtocol.VariablesArguments & Seq): Promise<DebugProtocol.Variable[]> {
         return this.sendParametricJson<DebugProtocol.Variable[]>('variables', args)
@@ -739,7 +745,14 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
 
     sendParametricJson<T>(command: string, params?: MapLike<string | number | boolean | null | undefined> | object, body?: Body): Promise<T> {
         const str = this.sendParametric(command, params, body, true)
-        return str.then((response) => JSON.parse(response) as T)
+        return str.then((response) => {
+            try {
+                return JSON.parse(response) as T
+            } catch (e) {
+                this.comm.output.appendLine("Failed to parse JSON: " + response)
+                throw new Error("Failed to parse JSON: " + response)
+            }
+        })
     }
 
     sendParametric<OutputString = true>(command: string, params?: { [key: string]: string | number | boolean | null | undefined } | object, body?: Body, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {

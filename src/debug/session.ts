@@ -81,6 +81,7 @@ export class DebugSession extends DebugSessionBase {
     private _progressId = 10000;
     private _cancelledProgressId: string | undefined = undefined;
     private _isProgressCancellable = true;
+    private _breakpointsSet = new vscode.EventEmitter<void>
 
     private _valuesInHex = false;
     private _useInvalidatedEvent = false;
@@ -103,7 +104,27 @@ export class DebugSession extends DebugSessionBase {
         this.setDebuggerPathFormat('deshader') // Everything other that 'path' is considered as an URI
     }
 
-    setupEvents() {
+    public sendErrorResponse(response: DebugProtocol.Response, codeOrMessage: number | DebugProtocol.Message, format?: string | undefined, variables?: any, dest?: ErrorDestination | undefined): void {
+        this.outputChannel?.appendLine(`sendErrorResponse ${response.command} ${codeOrMessage}`)
+        super.sendErrorResponse(response, codeOrMessage, format, variables, dest)
+    }
+
+    public sendEvent(event: DebugProtocol.Event): void {
+        this.outputChannel?.appendLine(`sendEvent ${event.event} ${JSON.stringify(event.body)}`)
+        super.sendEvent(event)
+    }
+
+    public sendRequest(command: string, args: any, timeout: number, cb: (response: DebugProtocol.Response) => void): void {
+        this.outputChannel?.appendLine(`sendRequest ${command} ${JSON.stringify(args)}`)
+        super.sendRequest(command, args, timeout, cb)
+    }
+
+    public sendResponse(response: DebugProtocol.Response): void {
+        this.outputChannel?.appendLine(`sendResponse ${response.command} ${JSON.stringify(response.body)}`)
+        super.sendResponse(response)
+    }
+
+    public setupEvents() {
         // setup event handlers
         this._comm.onJson<'stop'>(Events.stop, params => {
             if (params.step == 0) {
@@ -151,30 +172,179 @@ export class DebugSession extends DebugSessionBase {
         })
     }
 
-    public sendRequest(command: string, args: any, timeout: number, cb: (response: DebugProtocol.Response) => void): void {
-        this.outputChannel?.appendLine(`sendRequest ${command} ${JSON.stringify(args)}`)
-        super.sendRequest(command, args, timeout, cb)
+    protected async attachRequest(response: DebugProtocol.AttachResponse, args: IAttachRequestArguments) {
+        try {
+            if (this instanceof LoggingDebugSession) {
+                // make sure to 'Stop' the buffered logging if 'trace' is not set
+                logger.setup(args.showDebugOutput ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false)
+            }
+
+            await this.connectionConsistency(args)
+            await this._comm.ensureConnected()
+
+            await new Promise<void>((resolve) => {
+                setTimeout(resolve, 1500)
+                this._breakpointsSet.event(() => {
+                    resolve()
+                })
+            })
+
+            // we want the breakpoints to be set before we start debugging
+            // so the shaders don't need to be re-instrumented
+
+            await this._comm!.debug({ ...args, seq: response.request_seq })
+            response.body ||= {}
+
+            this.sendResponse(response)
+
+            this._connected.resolve()
+            setTimeout(() => this.initialState(), 1000)
+        } catch (e) {
+            this.commError(response, e, "Failed to attach: ")
+            this._connected.reject(e)
+        }
     }
 
-    public sendEvent(event: DebugProtocol.Event): void {
-        this.outputChannel?.appendLine(`sendEvent ${event.event} ${JSON.stringify(event.body)}`)
-        super.sendEvent(event)
+    protected async breakpointLocationsRequest(response: DebugProtocol.BreakpointLocationsResponse, args: DebugProtocol.BreakpointLocationsArguments): Promise<void> {
+        try {
+            await this.connected
+
+            args.line = this.convertClientLineToDebugger(args.line)
+            if (args.endLine) { args.endLine = this.convertClientLineToDebugger(args.endLine) }
+            if (args.column) { args.column = this.convertClientColumnToDebugger(args.column) }
+            if (args.endColumn) { args.column = this.convertClientColumnToDebugger(args.endColumn) }
+
+            const newArgs = {
+                path: await this.sourceToPath(args.source),
+                ...args,
+                seq: response.request_seq
+            }
+            delete (<any>newArgs).source
+            const deshaderResponse = await this._comm.possibleBreakpoints(newArgs)
+            response.body = {
+                breakpoints: deshaderResponse.breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
+            }
+
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
     }
 
-    public sendErrorResponse(response: DebugProtocol.Response, codeOrMessage: number | DebugProtocol.Message, format?: string | undefined, variables?: any, dest?: ErrorDestination | undefined): void {
-        this.outputChannel?.appendLine(`sendErrorResponse ${response.command} ${codeOrMessage}`)
-        super.sendErrorResponse(response, codeOrMessage, format, variables, dest)
+    protected async completionsRequest(response: DebugProtocol.CompletionsResponse, args: DebugProtocol.CompletionsArguments): Promise<void> {
+        try {
+            await this.connected
+
+            response.body = { targets: await this._comm.completion({ ...args, seq: response.request_seq }) }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
     }
 
-    public sendResponse(response: DebugProtocol.Response): void {
-        this.outputChannel?.appendLine(`sendResponse ${response.command} ${JSON.stringify(response.body)}`)
-        super.sendResponse(response)
+    protected async continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): Promise<void> {
+        try {
+            await this.connected
+
+            await this._comm.continue({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
     }
 
-    /**
-     * The 'initialize' request is the first request called by the frontend
-     * to interrogate the features the debug adapter provides.
-     */
+    protected convertClientBreakpointToDebugger(bp: DebugProtocol.SourceBreakpoint): DebugProtocol.SourceBreakpoint {
+        return {
+            line: this.convertClientLineToDebugger(bp.line),
+            column: typeof bp.column !== 'undefined' ? this.convertClientColumnToDebugger(bp.column) : undefined,
+            condition: bp.condition,
+            hitCondition: bp.hitCondition,
+            logMessage: bp.logMessage
+        }
+    }
+
+    protected async customRequest(command: string, response: DebugProtocol.Response, args: any) {
+        switch (command) {
+            case 'toggleFormatting':
+                this._valuesInHex = !this._valuesInHex
+                if (this._useInvalidatedEvent) {
+                    this.sendEvent(new InvalidatedEvent(['variables']))
+                }
+                break
+            case 'getCurrentShader':
+                response.body = this.shaders[this.currentShader]
+                break
+            case 'getPauseMode':
+                response.body = this.singlePauseMode
+                break
+            case 'updateStackItem':
+                const item = <vscode.DebugStackFrame | vscode.DebugThread>args
+                this.currentShader = item.threadId
+                break
+            case 'selectThread':
+                await this._comm.selectThread({ shader: this.currentShader, thread: args.thread, group: args.group, seq: response.request_seq })
+                break
+            case 'pauseMode':
+                await this._comm.pauseMode({ seq: response.request_seq, single: args.single })// TODO detect errors
+                this.singlePauseMode = args.single
+                break
+            default: this.sendErrorResponse(response, 1014, 'unrecognized request', null, ErrorDestination.Telemetry)
+        }
+
+        this.sendResponse(response)
+    }
+
+    protected async dataBreakpointInfoRequest(response: DebugProtocol.DataBreakpointInfoResponse, args: DebugProtocol.DataBreakpointInfoArguments): Promise<void> {
+        try {
+            await this.connected
+
+            response.body = await this._comm.dataBreakpointInfo({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments) {
+        try {
+            await this.connected
+
+            console.log(`disconnectRequest suspend: ${args.suspendDebuggee}, terminate: ${args.terminateDebuggee}`)
+
+            if (args.terminateDebuggee || await this.shouldStop((response.request_seq))) {
+                await this._comm.noDebug({ seq: response.request_seq + 1 })
+            }
+            super.disconnectRequest(response, args)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): Promise<void> {
+        try {
+            await this.connected
+
+            if (args.context == 'repl' && args.expression[0] == '/') {// send a manual command from debug console
+                this.sendEvent(new OutputEvent(await this._comm.send(args.expression.substring(1)), 'console'))
+            }
+            else {
+                response.body = await this._comm.evaluate({ ...args, seq: response.request_seq })
+            }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async initialState() {
+        const state = await this._comm.state()
+        this.singlePauseMode = state.singlePauseMode
+        this.processPushedBreakpoints(state.breakpoints)
+        if (state.paused) {
+            this.sendEvent(new StoppedEvent('entry'))
+        }
+    }
+
     protected async initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): Promise<void> {
         if (args.supportsProgressReporting) {
             this._reportProgress = true
@@ -251,113 +421,6 @@ export class DebugSession extends DebugSessionBase {
         // we request them early by sending an 'initializeRequest' to the frontend.
         // The frontend will end the configuration sequence by calling 'configurationDone' request.
         this.sendEvent(new InitializedEvent())
-    }
-
-    private processPushedBreakpoints(breakpoints: Breakpoint[]) {
-        this.outputChannel?.appendLine("Processing pushed breakpoints")
-        for (const bp of breakpoints) {
-            this.sendEvent(new BreakpointEvent('new', this.convertDebuggerBreakpointToClient(bp)))
-        }
-    }
-
-    protected async disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments) {
-        try {
-            await this.connected
-
-            console.log(`disconnectRequest suspend: ${args.suspendDebuggee}, terminate: ${args.terminateDebuggee}`)
-
-            if(args.terminateDebuggee || await this.shouldStop((response.request_seq))) {
-                await this._comm.noDebug({seq: response.request_seq + 1});
-            }
-            super.disconnectRequest(response, args)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async terminateRequest(response: DebugProtocol.TerminateResponse, args: DebugProtocol.TerminateArguments | undefined) {
-        try {
-            await this.connected
-
-            await this._comm.terminate({ ...args, seq: response.request_seq })
-            if (typeof deshader != 'undefined') {
-                if (await isRunning()) {
-                    terminate()
-                }
-            } else if (child_process && this._target) {
-                this._target.kill()
-            }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async initialState(response: DebugProtocol.Response) {
-        const state = await this._comm.state({ seq: response.request_seq })
-        this.singlePauseMode = state.singlePauseMode
-        this.processPushedBreakpoints(state.breakpoints)
-        if (state.paused) {
-            this.sendEvent(new StoppedEvent('entry'))
-        }
-    }
-
-    protected async attachRequest(response: DebugProtocol.AttachResponse, args: IAttachRequestArguments) {
-        try {
-            if (this instanceof LoggingDebugSession) {
-                // make sure to 'Stop' the buffered logging if 'trace' is not set
-                logger.setup(args.showDebugOutput ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false)
-            }
-
-            await this.connectionConsistency(args)
-            await this._comm.ensureConnected()
-            const breakpointsFromSource = await this._comm!.debug({ ...args, seq: response.request_seq })
-            response.body ||= {}
-
-            this.sendResponse(response)
-
-            await this.initialState(response)
-            this._connected.resolve()
-            setTimeout(() => this.processPushedBreakpoints(breakpointsFromSource), 500)
-        } catch (e) {
-            this.commError(response, e, "Failed to attach: ")
-            this._connected.reject(e)
-        }
-    }
-
-    private commError(response: DebugProtocol.Response, e?: any, message?: string) {
-        this.sendErrorResponse(response, {
-            id: 4,
-            format: `${message || ""}${unknownToString(e, true)} while ${response.command}`,
-            sendTelemetry: true,
-        })
-    }
-
-    private async connectionConsistency(args: AttachArguments) {
-        if (args.connection) {
-            const raw = toRawURL(args.connection).toString()
-            if (this._comm.endpointURL) {
-                if (raw != this._comm.endpointURL.toString()) {
-                    const choice = await vscode.window.showInformationMessage(`The connection URL ${args.connection} does not match already opened connection ${this._comm.endpointURL}`, {
-                        modal: true,
-                    }, "Use current connection", "Use new connection")
-                    if (choice == "Use new connection") {
-                        this._comm.endpointURL = raw
-                        args.connection = raw
-                    }
-                }
-            } else {
-                this._comm.endpointURL = raw
-                args.connection = raw
-            }
-        } else {
-            const u = this._comm.endpointURL
-            if (u) args.connection = u.toString()
-            else {
-                args.connection = DebugSession.DEFAULT_CONNECTION
-                this._comm.endpointURL = args.connection
-            }
-        }
     }
 
     protected async launchRequest(response: DebugProtocol.LaunchResponse, args: ILaunchRequestArguments) {
@@ -550,31 +613,117 @@ export class DebugSession extends DebugSessionBase {
 
             this.sendResponse(response)
             this._connected.resolve()
-            //setTimeout(()=>this.processPushedBreakpoints(breakpointsFromSource), 500)
-            await this.initialState(response)
+            setTimeout(()=>this.initialState(), 1000)
         } catch (e) {
             this.commError(response, e, "Failed to launch: ")
             this._connected.reject(e)
         }
     }
 
-    convertDebuggerBreakpointToClient<T extends Breakpoint | DebugProtocol.BreakpointLocation>(bp: T): typeof bp {
-        let result: any = { verified: 'verified' in bp ? bp.verified : undefined }
-        if (bp.line) { result.line = this.convertDebuggerLineToClient(bp.line) }
-        if (bp.column) { result.column = this.convertDebuggerColumnToClient(bp.column) }
-        if (bp.endColumn) { result.endColumn = this.convertDebuggerColumnToClient(bp.endColumn) }
-        if (bp.endLine) { result.endLine = this.convertDebuggerLineToClient(bp.endLine) }
-        if ('path' in bp && bp.path) { result.source = this.pathToSource(bp.path) }
-        return result
+    protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): Promise<void> {
+        try {
+            await this.connected
+
+            await this._comm.next({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
     }
 
-    protected convertClientBreakpointToDebugger(bp: DebugProtocol.SourceBreakpoint): DebugProtocol.SourceBreakpoint {
-        return {
-            line: this.convertClientLineToDebugger(bp.line),
-            column: typeof bp.column !== 'undefined' ? this.convertClientColumnToDebugger(bp.column) : undefined,
-            condition: bp.condition,
-            hitCondition: bp.hitCondition,
-            logMessage: bp.logMessage
+    protected async pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments) {
+        try {
+            await this.connected
+
+            await this._comm.pause({...args, seq: response.request_seq})
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async readMemoryRequest(response: DebugProtocol.ReadMemoryResponse, args: DebugProtocol.ReadMemoryArguments) {
+        try {
+            await this.connected
+
+            response.body = await this._comm.readMemory({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async restartRequest(response: DebugProtocol.RestartResponse, args: DebugProtocol.RestartArguments): Promise<void> {
+        try {
+            await this.connected
+            await this._comm.restart({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): Promise<void> {
+        try {
+            await this.connected
+
+            response.body = { scopes: await this._comm.scopes({ ...args, seq: response.request_seq }) }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): Promise<void> {
+        try {
+            await this.connected
+
+            const path = await this.sourceToPath(args.source)
+            const breakpoints = await this._comm.setBreakpoints({ path, breakpoints: args.breakpoints?.map(bp => this.convertClientBreakpointToDebugger(bp)), seq: response.request_seq })
+
+
+            // send back the actual breakpoint positions
+            response.body = {
+                breakpoints: breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
+            }
+
+            this.sendResponse(response)
+
+            this._breakpointsSet.fire()
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async setDataBreakpointsRequest(response: DebugProtocol.SetDataBreakpointsResponse, args: DebugProtocol.SetDataBreakpointsArguments): Promise<void> {
+        try {
+            await this.connected
+
+            // clear all data breakpoints
+            this._comm.clearDataBreakpoints(response.request_seq)
+
+            response.body = {
+                breakpoints: []
+            }
+
+            for (const dbp of args.breakpoints) {
+                const bp = await this._comm.setDataBreakpoint({ ...dbp, seq: response.request_seq })
+                response.body.breakpoints.push(bp)
+            }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async setExpressionRequest(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
+        try {
+            await this.connected
+
+            response.body = await this._comm.setExpression({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
         }
     }
 
@@ -591,44 +740,15 @@ export class DebugSession extends DebugSessionBase {
         }
     }
 
-    protected async setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): Promise<void> {
+    protected async setVariableRequest(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
         try {
             await this.connected
 
-            const path = await this.sourceToPath(args.source)
-            const breakpoints = await this._comm.setBreakpoints({ path, breakpoints: args.breakpoints?.map(bp => this.convertClientBreakpointToDebugger(bp)), seq: response.request_seq })
-
-            // send back the actual breakpoint positions
-            response.body = {
-                breakpoints: breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
+            const resp = await this._comm.setVariable({ ...args, seq: response.request_seq })
+            response.body = resp
+            if (resp.memoryReference) {
+                this.sendEvent(new MemoryEvent(String(resp.memoryReference), 0, resp.length!))
             }
-
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async breakpointLocationsRequest(response: DebugProtocol.BreakpointLocationsResponse, args: DebugProtocol.BreakpointLocationsArguments): Promise<void> {
-        try {
-            await this.connected
-
-            args.line = this.convertClientLineToDebugger(args.line)
-            if (args.endLine) { args.endLine = this.convertClientLineToDebugger(args.endLine) }
-            if (args.column) { args.column = this.convertClientColumnToDebugger(args.column) }
-            if (args.endColumn) { args.column = this.convertClientColumnToDebugger(args.endColumn) }
-
-            const newArgs = {
-                path: await this.sourceToPath(args.source),
-                ...args,
-                seq: response.request_seq
-            }
-            delete (<any>newArgs).source
-            const deshaderResponse = await this._comm.possibleBreakpoints(newArgs)
-            response.body = {
-                breakpoints: deshaderResponse.breakpoints.map(bp => this.convertDebuggerBreakpointToClient(bp))
-            }
-
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -669,11 +789,60 @@ export class DebugSession extends DebugSessionBase {
         }
     }
 
-    protected async scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): Promise<void> {
+    protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): Promise<void> {
         try {
             await this.connected
 
-            response.body = { scopes: await this._comm.scopes({ ...args, seq: response.request_seq }) }
+            await this._comm.stepIn({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async stepInTargetsRequest(response: DebugProtocol.StepInTargetsResponse, args: DebugProtocol.StepInTargetsArguments) {
+        try {
+            await this.connected
+
+            const targets = await this._comm.getStepInTargets({ ...args, seq: response.request_seq })
+            response.body = {
+                targets: targets.map(t => {
+                    if (t.column) { t.column = this.convertDebuggerColumnToClient(t.column) }
+                    if (t.endColumn) { t.endColumn = this.convertDebuggerColumnToClient(t.endColumn) }
+                    if (t.endLine) { t.endLine = this.convertDebuggerLineToClient(t.endLine) }
+                    if (t.line) { t.line = this.convertDebuggerLineToClient(t.line) }
+                    return t
+                })
+            }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): Promise<void> {
+        try {
+            await this.connected
+
+            await this._comm.stepOut({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async terminateRequest(response: DebugProtocol.TerminateResponse, args: DebugProtocol.TerminateArguments | undefined) {
+        try {
+            await this.connected
+
+            await this._comm.terminate({ ...args, seq: response.request_seq })
+            if (typeof deshader != 'undefined') {
+                if (await isRunning()) {
+                    terminate()
+                }
+            } else if (child_process && this._target) {
+                this._target.kill()
+            }
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -693,6 +862,73 @@ export class DebugSession extends DebugSessionBase {
         } catch (e) {
             this.commError(response, e)
         }
+    }
+
+    protected async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments): Promise<void> {
+        try {
+            await this.connected
+
+            response.body = { variables: await this._comm.variables({ ...args, seq: response.request_seq }) }
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    protected async writeMemoryRequest(response: DebugProtocol.WriteMemoryResponse, args: DebugProtocol.WriteMemoryArguments) {
+        try {
+            await this.connected
+
+            response.body = await this._comm.writeMemory({ ...args, seq: response.request_seq })
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
+    private commError(response: DebugProtocol.Response, e?: any, message?: string) {
+        this.sendErrorResponse(response, {
+            id: 4,
+            format: `${message || ""}${unknownToString(e, true)} while ${response.command}`,
+            sendTelemetry: true,
+        })
+    }
+
+    private async connectionConsistency(args: AttachArguments) {
+        if (args.connection) {
+            const raw = toRawURL(args.connection).toString()
+            if (this._comm.endpointURL) {
+                if (raw != this._comm.endpointURL.toString()) {
+                    const choice = await vscode.window.showInformationMessage(`The connection URL ${args.connection} does not match already opened connection ${this._comm.endpointURL}`, {
+                        modal: true,
+                    }, "Use current connection", "Use new connection")
+                    if (choice == "Use new connection") {
+                        this._comm.endpointURL = raw
+                        args.connection = raw
+                    }
+                }
+            } else {
+                this._comm.endpointURL = raw
+                args.connection = raw
+            }
+        } else {
+            const u = this._comm.endpointURL
+            if (u) args.connection = u.toString()
+            else {
+                args.connection = DebugSession.DEFAULT_CONNECTION
+                this._comm.endpointURL = args.connection
+            }
+        }
+    }
+
+    private convertDebuggerBreakpointToClient<T extends Breakpoint | DebugProtocol.BreakpointLocation>(bp: T): typeof bp {
+        let result: any = { verified: 'verified' in bp ? bp.verified : undefined }
+        if (bp.line) { result.line = this.convertDebuggerLineToClient(bp.line) }
+        if (bp.column) { result.column = this.convertDebuggerColumnToClient(bp.column) }
+        if (bp.endColumn) { result.endColumn = this.convertDebuggerColumnToClient(bp.endColumn) }
+        if (bp.endLine) { result.endLine = this.convertDebuggerLineToClient(bp.endLine) }
+        if ('path' in bp && bp.path) { result.source = this.pathToSource(bp.path) }
+        return result
     }
 
     private convertThreads(shaders: RunningShader[]): DebugProtocol.Thread[] {
@@ -724,220 +960,6 @@ export class DebugSession extends DebugSessionBase {
         return resultThreads
     }
 
-    protected async writeMemoryRequest(response: DebugProtocol.WriteMemoryResponse, args: DebugProtocol.WriteMemoryArguments) {
-        try {
-            await this.connected
-
-            response.body = await this._comm.writeMemory({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async readMemoryRequest(response: DebugProtocol.ReadMemoryResponse, args: DebugProtocol.ReadMemoryArguments) {
-        try {
-            await this.connected
-
-            response.body = await this._comm.readMemory({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments): Promise<void> {
-        try {
-            await this.connected
-
-            response.body = { variables: await this._comm.variables({ ...args, seq: response.request_seq }) }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async setVariableRequest(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
-        try {
-            await this.connected
-
-            const resp = await this._comm.setVariable({ ...args, seq: response.request_seq })
-            response.body = resp
-            if (resp.memoryReference) {
-                this.sendEvent(new MemoryEvent(String(resp.memoryReference), 0, resp.length!))
-            }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): Promise<void> {
-        try {
-            await this.connected
-
-            await this._comm.continue({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): Promise<void> {
-        try {
-            await this.connected
-
-            await this._comm.next({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async stepInTargetsRequest(response: DebugProtocol.StepInTargetsResponse, args: DebugProtocol.StepInTargetsArguments) {
-        try {
-            await this.connected
-
-            const targets = await this._comm.getStepInTargets({ ...args, seq: response.request_seq })
-            response.body = {
-                targets: targets.map(t => {
-                    if (t.column) { t.column = this.convertDebuggerColumnToClient(t.column) }
-                    if (t.endColumn) { t.endColumn = this.convertDebuggerColumnToClient(t.endColumn) }
-                    if (t.endLine) { t.endLine = this.convertDebuggerLineToClient(t.endLine) }
-                    if (t.line) { t.line = this.convertDebuggerLineToClient(t.line) }
-                    return t
-                })
-            }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): Promise<void> {
-        try {
-            await this.connected
-
-            await this._comm.stepIn({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async stepOutRequest(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): Promise<void> {
-        try {
-            await this.connected
-
-            await this._comm.stepOut({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): Promise<void> {
-        try {
-            await this.connected
-
-            if (args.context == 'repl' && args.expression[0] == '/') {// send a manual command from debug console
-                this.sendEvent(new OutputEvent(await this._comm.send(args.expression.substring(1)), 'console'))
-            }
-            else {
-                response.body = await this._comm.evaluate({ ...args, seq: response.request_seq })
-            }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async setExpressionRequest(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
-        try {
-            await this.connected
-
-            response.body = await this._comm.setExpression({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async dataBreakpointInfoRequest(response: DebugProtocol.DataBreakpointInfoResponse, args: DebugProtocol.DataBreakpointInfoArguments): Promise<void> {
-        try {
-            await this.connected
-
-            response.body = await this._comm.dataBreakpointInfo({ ...args, seq: response.request_seq })
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async setDataBreakpointsRequest(response: DebugProtocol.SetDataBreakpointsResponse, args: DebugProtocol.SetDataBreakpointsArguments): Promise<void> {
-        try {
-            await this.connected
-
-            // clear all data breakpoints
-            this._comm.clearDataBreakpoints(response.request_seq)
-
-            response.body = {
-                breakpoints: []
-            }
-
-            for (const dbp of args.breakpoints) {
-                const bp = await this._comm.setDataBreakpoint({ ...dbp, seq: response.request_seq })
-                response.body.breakpoints.push(bp)
-            }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async completionsRequest(response: DebugProtocol.CompletionsResponse, args: DebugProtocol.CompletionsArguments): Promise<void> {
-        try {
-            await this.connected
-
-            response.body = { targets: await this._comm.completion({ ...args, seq: response.request_seq }) }
-            this.sendResponse(response)
-        } catch (e) {
-            this.commError(response, e)
-        }
-    }
-
-    protected async customRequest(command: string, response: DebugProtocol.Response, args: any) {
-        switch (command) {
-            case 'toggleFormatting':
-                this._valuesInHex = !this._valuesInHex
-                if (this._useInvalidatedEvent) {
-                    this.sendEvent(new InvalidatedEvent(['variables']))
-                }
-                break
-            case 'getCurrentShader':
-                response.body = this.shaders[this.currentShader]
-                break
-            case 'getPauseMode':
-                response.body = this.singlePauseMode
-                break
-            case 'updateStackItem':
-                const item = <vscode.DebugStackFrame | vscode.DebugThread>args
-                this.currentShader = item.threadId
-                break
-            case 'selectThread':
-                await this._comm.selectThread({ shader: this.currentShader, thread: args.thread, group: args.group, seq: response.request_seq })
-                break
-            case 'pauseMode':
-                await this._comm.pauseMode({ seq: response.request_seq, single: args.single })// TODO detect errors
-                this.singlePauseMode = args.single
-                break
-            default: this.sendErrorResponse(response, 1014, 'unrecognized request', null, ErrorDestination.Telemetry)
-        }
-
-        this.sendResponse(response)
-    }
-
-    // debugger paths do not include deshader: scheme
     private pathToSource(path: string): Source {
         const u = this._comm.endpointURL
         if (u == null) {
@@ -950,7 +972,32 @@ export class DebugSession extends DebugSessionBase {
         )
     }
 
-    // debugger paths do not include deshader: scheme
+    private processPushedBreakpoints(breakpoints: Breakpoint[]) {
+        this.outputChannel?.appendLine("Processing pushed breakpoints")
+        for (const bp of breakpoints) {
+            this.sendEvent(new BreakpointEvent('new', this.convertDebuggerBreakpointToClient(bp)))
+        }
+    }
+
+    private async shouldStop(seq: number) {
+        const config = vscode.workspace.getConfiguration('deshader.debugging')
+
+        if (debugSessions.size) {
+            // stop only if we are really running a debug session (for example the disconnectRequest can be preventively)
+            // called even if the debug session is not connected
+            if (config.get<boolean>('stopOnDisconnect', true)) {
+                try {
+                    const clients = await this._comm.clients({ seq })
+                    return clients.length
+                } catch (_) {
+                    // not connected, so assume we are the only client
+                    return 1
+                }
+            }
+        }
+        return 0
+    }
+
     private async sourceToPath(source: DebugProtocol.Source): Promise<string> {
         if (source.path) {
             const parsed = vscode.Uri.parse(source.path)// assumes one leading slash after protocol
@@ -958,22 +1005,5 @@ export class DebugSession extends DebugSessionBase {
         } else {
             return await this._comm.readLink({ path: `/hash/${source.sourceReference}` })
         }
-    }
-
-    /**
-     * @returns The number of clients connected to the server or a dummy value if the connection is not established
-     */
-    private async shouldStop(seq: number) {
-        const config = vscode.workspace.getConfiguration('deshader.debugging')
-
-        if(config.get<boolean>('stopOnDisconnect', true)) {
-            try {
-                const clients = await this._comm.clients({seq});
-                return clients.length;
-            } catch (_) {
-                return 1;
-            }
-        }
-        return 0
     }
 }
