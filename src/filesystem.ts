@@ -270,8 +270,13 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 	async writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): Promise<void> {
 		await this.checkConnection(uri)
 
-		if (options.create) {
-			throw vscode.FileSystemError.Unavailable("Shaders need to be created in the host application")
+		try {
+			const stat = await this.comm.stat({ path: uri.path });
+			if(stat && stat.permissions && (stat.permissions & vscode.FilePermission.Readonly)) { 
+				return Promise.reject(vscode.FileSystemError.NoPermissions("Cannot write to a read-only file"))
+			}
+		} catch (e) {
+			return Promise.reject(vscode.FileSystemError.Unavailable("Shaders need to be created in the host application"))
 		}
 
 		try {

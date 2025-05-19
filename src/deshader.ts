@@ -820,7 +820,7 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
             this.pendingRequests[id].promise = p
             if ((this.ws?.readyState ?? WebSocket.CONNECTING) == WebSocket.CONNECTING) { await this.connected }
             this.comm.output.appendLine(`${command}\n${body ?? ""}`)
-            this.ws!.send(new Blob([command, ...(body ? [body] : [])]))
+            this.ws!.send(new Blob([command, ...(body ? ["\0", body] : [])]))
             return p as Promise<OutputString extends false ? Blob : string>
         } else {
             this.comm.output.appendLine(`Duplicate send request ${seq ?? ""} ${command} ${body ?? ""}`)
