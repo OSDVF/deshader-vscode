@@ -965,6 +965,11 @@ export class DebugSession extends DebugSessionBase {
         if (u == null) {
             throw new Error("Missing Deshader endpoint")
         }
+        for (const folder of vscode.workspace.workspaceFolders || []){
+            if(folder.uri.authority.includes(u.host)) {
+                return new Source(basename(path),folder.uri.with({ path: path }).toString())
+            }
+        }
 
         return new Source(basename(path),
             // path contains leading slash
