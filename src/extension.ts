@@ -346,14 +346,17 @@ export async function activate(context: vscode.ExtensionContext) {
 					break
 			}
 			let anotherDeshader = false
+			let i = 0
 			for (const f of vscode.workspace.workspaceFolders || []) {
 				if (f.uri.scheme === comm.scheme) {
 					if (f.uri.authority === comm.endpointURL?.host) {
-						vscode.window.showInformationMessage('Shader workspace already open')
-						return
+						if (await vscode.window.showInformationMessage('Shader workspace already open. Close it?', 'Yes')) {
+							vscode.workspace.updateWorkspaceFolders(i, 1)
+						}
 					}
 					anotherDeshader = true
 				}
+				i++
 			}
 
 			return vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length || 0, 0, {
