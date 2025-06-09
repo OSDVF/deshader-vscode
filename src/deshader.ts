@@ -209,6 +209,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
 
     shown = 0
+    showing = false
     private async updateImpl() {
         if (this.impl) {
             this.impl.dispose()
@@ -223,10 +224,14 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
             this.impl.onDisconnected = this._onDisconnected
             this.impl.onMessage = this._onMessage
             await this.impl.open()
+            this.showing = false
+            this.shown = 0
             this.settings(this._settings)
         } else {
-            if (this.shown++ < 3) {
+            if (this.shown++ < 3 && !this.showing) {
+                this.showing = true
                 vscode.window.showErrorMessage("Connect to a Deshader command server first", "Connect").then((item) => {
+                    this.showing = false
                     if (item) {
                         vscode.commands.executeCommand(Commands.connect)
                     }
@@ -693,6 +698,9 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
 
     async open() {
         await super.open()
+        this.showing = false
+        this.shown = 0
+
         this.connected.then(() => this.comm.emit(Events.connected))
         this.ws!.addEventListener('message', async (event: MessageEvent<Blob | string>) => {
             // TODO: do not toString
@@ -779,12 +787,15 @@ export class WSCommunicator extends WebSocketContainer implements ICommunicatorI
     }
 
     shown = 0
+    showing = false
     async sendCommand<OutputString = true>(command: string, body?: Body, seq?: number, outputString: boolean | OutputString = true): Promise<OutputString extends false ? Blob : string> {
         if (this.connectionState == ConnectionState.Disconnected) {
-            if (this.shown++ < 3) {
+            if (this.shown++ < 3 && !this.showing) {
+                this.showing = true
                 const item = await vscode.window.showErrorMessage("Deshader command server is not connected", "Connect")
+                this.showing = false
                 if (item) {
-                    vscode.commands.executeCommand("deshader.connect")
+                    vscode.commands.executeCommand(Commands.connect)
                 }
 
             }

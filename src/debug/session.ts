@@ -58,9 +58,10 @@ export class DebugSession extends DebugSessionBase {
 
     public shaders: RunningShader[] = [];
     /**
-     * index into this.shaders
+     * `RunningShader.id`. Relies on the mechanism that `extension.ts` dispatches `updateStackItem` in `vscode.debug.onDidChangeActiveStackItem` event.
      */
     public currentShader = 0;
+    public paused = false;
     public outputChannel: vscode.OutputChannel | null = null;
     public singlePauseMode = false;
 
@@ -127,14 +128,17 @@ export class DebugSession extends DebugSessionBase {
     public setupEvents() {
         // setup event handlers
         this._comm.onJson<'stop'>(Events.stop, params => {
+            this.paused = true
             if (params.step == 0) {
                 this.sendEvent(new StoppedEvent('entry', params.thread))
             } else { this.sendEvent(new StoppedEvent('step', params.thread)) }
         })
         this._comm.onJson<'stopOnBreakpoint'>(Events.stopOnBreakpoint, (params) => {
+            this.paused = true
             this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.thread, hitBreakpointIds: params.ids })))
         })
         this._comm.onJson<'stopOnDataBreakpoint'>(Events.stopOnDataBreakpoint, (threadID) => {
+            this.paused = true
             this.sendEvent(new StoppedEvent('data breakpoint', threadID))
         })
         this._comm.onJson<'breakpoint'>(Events.breakpoint, (event: DeshaderBreakpointEvent) => {
@@ -247,6 +251,7 @@ export class DebugSession extends DebugSessionBase {
             await this.connected
 
             await this._comm.continue({ ...args, seq: response.request_seq })
+            this.paused = false
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -272,17 +277,21 @@ export class DebugSession extends DebugSessionBase {
                 }
                 break
             case 'getCurrentShader':
-                response.body = this.shaders[this.currentShader]
+                if (this.paused) {
+                    response.body = this.shaders.find(s => s.id == this.currentShader)
+                }
                 break
             case 'getPauseMode':
                 response.body = this.singlePauseMode
                 break
-            case 'updateStackItem':
+            case 'updateStackItem'://set the shader for which the RunningShader info is returned in getCurrentShader
                 const item = <vscode.DebugStackFrame | vscode.DebugThread>args
                 this.currentShader = item.threadId
                 break
             case 'selectThread':
-                await this._comm.selectThread({ shader: this.currentShader, thread: args.thread, group: args.group, seq: response.request_seq })
+                const shader = this.shaders.find(s => s.id == this.currentShader)
+                if (shader)
+                    await this._comm.selectThread({ shader: shader.id, thread: args.thread, group: args.group, seq: response.request_seq })
                 break
             case 'pauseMode':
                 await this._comm.pauseMode({ seq: response.request_seq, single: args.single })// TODO detect errors
@@ -407,7 +416,9 @@ export class DebugSession extends DebugSessionBase {
         response.body.supportsRestartFrame = false
         response.body.supportsFunctionBreakpoints = true
         response.body.supportsDelayedStackTraceLoading = true
-        response.body.supportsSingleThreadExecutionRequests = false
+        // A DAP "thread" is effectively mapped to a shader stage. VSCode's thread selection mechanism is used to control the selected stage.
+        // Custom UI is used for actually selecting a particular shader thread. (The Commands.selectThread command)
+        response.body.supportsSingleThreadExecutionRequests = true
 
         response.body.supportsConditionalBreakpoints = true
         response.body.supportsGotoTargetsRequest = false
@@ -625,6 +636,7 @@ export class DebugSession extends DebugSessionBase {
             await this.connected
 
             await this._comm.next({ ...args, seq: response.request_seq })
+            this.paused = false
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -794,6 +806,7 @@ export class DebugSession extends DebugSessionBase {
             await this.connected
 
             await this._comm.stepIn({ ...args, seq: response.request_seq })
+            this.paused = false
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -825,6 +838,7 @@ export class DebugSession extends DebugSessionBase {
             await this.connected
 
             await this._comm.stepOut({ ...args, seq: response.request_seq })
+            this.paused = false
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -843,6 +857,7 @@ export class DebugSession extends DebugSessionBase {
             } else if (child_process && this._target) {
                 this._target.kill()
             }
+            this.paused = false
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -965,9 +980,9 @@ export class DebugSession extends DebugSessionBase {
         if (u == null) {
             throw new Error("Missing Deshader endpoint")
         }
-        for (const folder of vscode.workspace.workspaceFolders || []){
-            if(folder.uri.authority.includes(u.host)) {
-                return new Source(basename(path),folder.uri.with({ path: path }).toString())
+        for (const folder of vscode.workspace.workspaceFolders || []) {
+            if (folder.uri.authority.includes(u.host)) {
+                return new Source(basename(path), folder.uri.with({ path: path }).toString())
             }
         }
 
@@ -992,11 +1007,13 @@ export class DebugSession extends DebugSessionBase {
             // called even if the debug session is not connected
             if (config.get<boolean>('stopOnDisconnect', true)) {
                 try {
+                    if (!this._comm.isConnected) return 0
+
                     const clients = await this._comm.clients({ seq })
                     return clients.length
                 } catch (_) {
-                    // not connected, so assume we are the only client
-                    return 1
+                    // not connected, cannot even send stop request
+                    return 0
                 }
             }
         }

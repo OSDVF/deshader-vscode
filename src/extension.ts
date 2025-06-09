@@ -89,11 +89,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	const threadStatusItem = vscode.window.createStatusBarItem('selectedThread', vscode.StatusBarAlignment.Left, 900)
 	threadStatusItem.name = 'Shader Thread'
-	threadStatusItem.tooltip = 'Select different shader thread'
 	threadStatusItem.command = Commands.selectThread
 	async function updateStatus(session?: vscode.DebugSession) {
 		if (typeof session !== 'undefined' && session.type == DebugSession.TYPE) {
-			modeStatusItem.text = await session.customRequest('getPauseMode') ? '$(run)' : '$(run-all)'
+			const result = await session.customRequest('getPauseMode');
+			modeStatusItem.text = result ? '$(run)' : '$(run-all)'
 			modeStatusItem.show()
 			threadStatusItem.show()
 		} else {
@@ -482,18 +482,21 @@ export async function activate(context: vscode.ExtensionContext) {
 	if (typeof vscode.debug.onDidChangeActiveStackItem !== 'undefined') {
 		context.subscriptions.push(vscode.debug.onDidChangeActiveStackItem(async (e) => {
 			if (typeof e !== 'undefined' && e.session.type === DebugSession.TYPE) {
-				e.session.customRequest('updateStackItem', e)
-				threadStatusItem.show()
+				// select the thread to return info about
+				await e.session.customRequest('updateStackItem', e)
+				// query the current shader
 				const currentShader = await e.session.customRequest('getCurrentShader') as RunningShader
 				if(!currentShader) {
 					threadStatusItem.hide()
+					return
 				}
 				if (currentShader.selectedGroup) {
 					threadStatusItem.text = `$(pulse) (${currentShader.selectedGroup.join(',')})(${currentShader.selectedThread.join(',')})`
 				} else {
 					threadStatusItem.text = `$(pulse) (${currentShader.selectedThread.join(',')})`
 				}
-				threadStatusItem.hide()
+				threadStatusItem.tooltip = 'Select different shader thread for ' + currentShader.name
+				threadStatusItem.show()
 			} else {
 				threadStatusItem.hide()
 			}

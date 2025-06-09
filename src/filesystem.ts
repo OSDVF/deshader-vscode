@@ -99,10 +99,10 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 				if (this.showingError) {
 					throw vscode.FileSystemError.Unavailable("Not connected to Deshader")
 				}
-				this.showingError = true
 				const hasEndpoint = this.comm.endpointURL != null
 				try {
-					const value = await vscode.window.showErrorMessage('Connection lost.' + (hasEndpoint ? ` Reconnect to ${this.comm.endpointURL!.host}?` : ''), "Connect")
+					this.showingError = true
+					const value = await vscode.window.showErrorMessage(hasEndpoint ? `Connection lost. Reconnect to ${this.comm.endpointURL!.host}?` : `No connection to ${uri?.authority}`, "Connect")
 					if (value) {
 						let resolve: VoidFunction | null = null
 						let reject: ErrorFunction | null = null
@@ -124,7 +124,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 								}
 								if (resolve != null) (resolve as VoidFunction)()
 							} else {
-								await vscode.commands.executeCommand("deshader.connect")
+								await vscode.commands.executeCommand(Commands.connect)
 								await this.comm.ensureConnected()
 								if (resolve) (resolve as VoidFunction)()
 							}
@@ -132,6 +132,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 							if (reject) (reject as ErrorFunction)(e)
 						}
 					} else {
+						this.showingError = false
 						throw vscode.FileSystemError.Unavailable("Not connected to Deshader")
 					}
 					this.showingError = false
@@ -322,7 +323,8 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 
 	async delete(uri: vscode.Uri): Promise<void> {
 		if (!isTagged(uri.path)) {
-			throw vscode.FileSystemError.NoPermissions("Only tags can be deleted. Not real shaders or programs.")
+			vscode.window.showErrorMessage("Only tags can be deleted. Not actual shaders or programs.")
+			throw vscode.FileSystemError.NoPermissions(uri)
 		}
 		await this.checkConnection(uri)
 		try {
