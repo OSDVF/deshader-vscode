@@ -3,6 +3,7 @@ import { ProviderResult } from 'vscode'
 import { DebugSession, deshaderSessions } from './debug/session'
 import { DeshaderFilesystem } from './filesystem'
 import { Communicator, ConnectionState, DeshaderScheme, DeshaderSchemes, DeshaderSchemesAndRaw, toRawURL, RunningShader, WebSocketContainer, WithColon } from './deshader'
+import { createStatusBarItems } from './status'
 import { deshaderTerminal, PROFILE } from './terminal'
 import { deshaderLanguageClient } from './language'
 import { unknownToString } from './format'
@@ -45,14 +46,17 @@ export async function activate(context: vscode.ExtensionContext) {
 			registerRemoteFileProvider(f)
 		}
 	}
+
+	const status = createStatusBarItems(context, comm)
+
 	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(async (e) => {
 		for (const a of e.added) {
 			registerRemoteFileProvider(a)
-			if(a.uri.scheme.startsWith('deshader') || a.uri.authority.startsWith('deshader')) {
+			if (a.uri.scheme.startsWith('deshader') || a.uri.authority.startsWith('deshader')) {
 				// check if we are already debugging on the Deshader side
 				const commState = await comm.state({})
 				if (commState.debugging && deshaderSessions.size == 0) {
-					if(await vscode.window.showInformationMessage('Target program is already in debugging state. Do you want to attach a debug session to it?', 'Yes')) {
+					if (await vscode.window.showInformationMessage('Target program is already in debugging state. Do you want to attach a debug session to it?', 'Yes')) {
 						vscode.debug.startDebugging(a, "Deshader Integrated")
 					}
 				}
@@ -66,10 +70,19 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 	}))
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(DebugSession.TYPE, new InlineDebugAdapterFactory(comm, output)))
-	if (parsedOS === 'Mac OS') {
-		vscode.workspace.onDidChangeConfiguration(async e => {
-			if (e.affectsConfiguration('deshader')) {
-				const config = vscode.workspace.getConfiguration('deshader')
+	const lspContainer = new WebSocketContainer()
+	context.subscriptions.push(lspContainer)
+
+
+
+	async function notDebuggingMessage() {
+		vscode.window.showErrorMessage("Deshader debugging session isn't currently active")
+	}
+
+	vscode.workspace.onDidChangeConfiguration(async e => {
+		if (e.affectsConfiguration('deshader')) {
+			const config = vscode.workspace.getConfiguration('deshader')
+			if (parsedOS === 'Mac OS') {
 				const p = config.get<string>('path', '')
 				if (p.endsWith('.app') || p.endsWith('.app/')) {
 					if (await vscode.window.showInformationMessage('The path to the Deshader Library ends with .app. Do you want to set it to standard library location within the application bundle?', 'Yes', 'No') === 'Yes') {
@@ -77,57 +90,12 @@ export async function activate(context: vscode.ExtensionContext) {
 					}
 				}
 			}
-		})
-	}
-
-	const lspContainer = new WebSocketContainer()
-	context.subscriptions.push(lspContainer)
-
-	async function notDebuggingMessage() {
-		vscode.window.showErrorMessage("Deshader debugging session isn't currently active")
-	}
-
-	const threadStatusItem = vscode.window.createStatusBarItem('selectedThread', vscode.StatusBarAlignment.Left, 900)
-	threadStatusItem.name = 'Shader Thread'
-	threadStatusItem.command = Commands.selectThread
-	async function updateStatus(session?: vscode.DebugSession) {
-		if (typeof session !== 'undefined' && session.type == DebugSession.TYPE) {
-			const result = await session.customRequest('getPauseMode');
-			modeStatusItem.text = result ? '$(run)' : '$(run-all)'
-			modeStatusItem.show()
-			threadStatusItem.show()
-		} else {
-			modeStatusItem.hide()
-			threadStatusItem.hide()
-		}
-	}
-	const modeStatusItem = vscode.window.createStatusBarItem('pauseMode', vscode.StatusBarAlignment.Left, 850)
-	modeStatusItem.command = Commands.pauseMode
-	modeStatusItem.name = 'Shader Pause Mode'
-	modeStatusItem.tooltip = 'Select shader pause granularity mode'
-
-	const connectionStatusItem = vscode.window.createStatusBarItem('deshader', vscode.StatusBarAlignment.Left, 1000)
-	connectionStatusItem.name = 'Deshader'
-	function initialStatusItemState() {
-		vscode.commands.executeCommand('setContext', 'deshader.connected', false)
-
-		connectionStatusItem.text = '$(plug) Deshader'
-		connectionStatusItem.command = Commands.connect
-		connectionStatusItem.tooltip = 'Click to connect to Deshader'
-		connectionStatusItem.show()
-	}
-	initialStatusItemState()
-	comm.onConnected.add(async () => {
-		vscode.commands.executeCommand('setContext', 'deshader.connected', true)
-		const u = comm.endpointURL
-		if (u) {
-			connectionStatusItem.text = "$(extension-deshader) " + u.host
-			connectionStatusItem.tooltip = `Deshader connected (${comm.scheme}). Click to disconnect.`
-			connectionStatusItem.command = Commands.disconnect
+			status.updateThreadMode(config.get<string>('debugging.threadMode', 'single') == 'single')
+			status.updateSaveMode(config.get<string>('saveMode') === 'physical')
 		}
 	})
 
-	comm.onDisconnected.add(initialStatusItemState)
+
 	comm.onDisconnected.add(() => {
 		for (const s of deshaderSessions) {
 			vscode.debug.stopDebugging(s)// TODO find the correct session
@@ -144,7 +112,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// Register disposables
 	context.subscriptions.push(
-		connectionStatusItem,
 		vscode.commands.registerCommand(Commands.askForProgramName, () => vscode.window.showInputBox({
 			placeHolder: 'Please enter the path of an executable file relative to the workspace root',
 			value: 'a.out'
@@ -187,7 +154,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			if (comm.isConnected) {
 				comm.disconnect()
 			}
-			initialStatusItemState()
+			status.deshaderNotConnected()
 		}),
 		vscode.commands.registerCommand(Commands.download, async () => {
 			if (typeof deshader != 'undefined') {
@@ -389,27 +356,43 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		}),
+		vscode.commands.registerCommand(Commands.savePhysically, async () => {
+			if(!vscode.window.activeTextEditor) vscode.window.showErrorMessage("No active text editor");
+
+			fs.beginSavePhysically();
+			await vscode.workspace.save(vscode.window.activeTextEditor!.document.uri);
+			fs.endSavePhysically();
+		}),
+		vscode.commands.registerCommand(Commands.savePhysicallyAll, async () => {
+			fs.beginSavePhysically();
+			await vscode.workspace.saveAll(false);// TODO only save shaders and not other files
+			fs.endSavePhysically();
+		}),
+		vscode.commands.registerCommand(Commands.saveMode, async (arg?: string) => {
+			const result = arg || await vscode.window.showQuickPick(['Physically', 'Virtually'], {canPickMany: false, placeHolder: 'Select save mode'});
+			if(result) await vscode.workspace.getConfiguration('deshader').update('saveMode', result.toLowerCase());  
+		}),
 		vscode.commands.registerCommand(Commands.selectThread, async () => {
 			const sess = vscode.debug.activeDebugSession
 			if (sess?.type === 'deshader') {
 				const current = await sess?.customRequest('getCurrentShader') as RunningShader
-				let stringThread = current.selectedThread.join(',')
+				let stringThread = current.pivot.thread.join(',')
 				let newThread = await vscode.window.showInputBox({
 					value: stringThread,
 					placeHolder: stringThread,
-					prompt: 'Enter the thread identifier x,?y,?z',
+					prompt: 'Enter the thread identifier x,?y,?z (maximum ' + current.groupDim.join(',') + ')',
 					title: 'Select shader thread',
 				})
 				newThread ??= stringThread
 				const thread = newThread.trim().split(',').map((x) => parseInt(x))
 				let group: number[] = []
 				let isNewGroup = false
-				if (current.selectedGroup) {
-					let stringGroup = current.selectedGroup.join(',')
+				if (current.groupCount) {
+					let stringGroup = (current.pivot.group ?? []).join(',')
 					let newGroup = await vscode.window.showInputBox({
 						value: stringGroup,
 						placeHolder: stringGroup,
-						prompt: 'Enter the group identifier x,?y,?z',
+						prompt: 'Enter the group identifier x,?y,?z (maximum ' + current.groupCount.join(', ') + ')',
 						title: 'Select shader thread group',
 					})
 					newGroup ??= stringGroup
@@ -418,7 +401,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					isNewGroup = newGroup !== stringGroup
 				}
 				if (newThread.trim() === stringThread && !isNewGroup) {
-					vscode.window.showInformationMessage('No changes made to the thread selection')
+					messageWithTimeout('No changes made to the thread selection')
 					return
 				}
 
@@ -443,14 +426,24 @@ export async function activate(context: vscode.ExtensionContext) {
 				await notDebuggingMessage()
 			}
 		}),
-		vscode.commands.registerCommand(Commands.pauseMode, async () => {
+		vscode.commands.registerCommand(Commands.threadMode, async () => {
 			const sess = vscode.debug.activeDebugSession
 			if (sess?.type === DebugSession.TYPE) {
-				const picked = await vscode.window.showQuickPick(["Single", "All"], { canPickMany: false, placeHolder: 'Select shader pause granularity mode', title: 'Pause Mode' })
+				const picked = await vscode.window.showQuickPick([{
+					label: 'Single Thread',
+					description: 'Debugging data will be reported only from the selected pivot thread',
+					value: 'single',
+				}, {
+					label: 'All',
+					description: 'Debugging data will be reported from all threads with one pivot thread which will be always tracked in the UI (uses more memory)',
+					value: 'all',
+				}], { canPickMany: false, placeHolder: 'Select multithreaded debugging mode', title: 'Multithreading Mode' })
 				if (typeof picked !== 'undefined') {
-					const single = picked == "Single"
-					await sess.customRequest('pauseMode', { single })
-					modeStatusItem.text = single ? '$(run)' : '$(run-all)'
+					vscode.workspace.getConfiguration('deshader.debugging').update('threadMode', picked.value)
+					// the communicator will automatically send the new mode to the backend (it listens on config changes)
+					if (await sess?.customRequest('isPaused')) {
+						messageWithTimeout('The new multithreading mode will be applied after unpausing the execution')
+					}
 				}
 			} else {
 				await notDebuggingMessage()
@@ -468,40 +461,9 @@ export async function activate(context: vscode.ExtensionContext) {
 				return new vscode.TerminalProfile(deshaderTerminal(comm))
 			}
 		} as vscode.TerminalProfileProvider),
-		vscode.debug.onDidStartDebugSession(updateStatus),
-		vscode.debug.onDidChangeActiveDebugSession(updateStatus),
-		vscode.debug.onDidTerminateDebugSession((e) => {
-			if (e.type == DebugSession.TYPE) {
-				modeStatusItem.hide()
-				threadStatusItem.hide()
-			}
-		}),
 		vscode.debug.registerDebugConfigurationProvider(DebugSession.TYPE, new ConfigurationProvider())
 	)
-	// Update the current shader ref when the active debug session selected thread changes
-	if (typeof vscode.debug.onDidChangeActiveStackItem !== 'undefined') {
-		context.subscriptions.push(vscode.debug.onDidChangeActiveStackItem(async (e) => {
-			if (typeof e !== 'undefined' && e.session.type === DebugSession.TYPE) {
-				// select the thread to return info about
-				await e.session.customRequest('updateStackItem', e)
-				// query the current shader
-				const currentShader = await e.session.customRequest('getCurrentShader') as RunningShader
-				if(!currentShader) {
-					threadStatusItem.hide()
-					return
-				}
-				if (currentShader.selectedGroup) {
-					threadStatusItem.text = `$(pulse) (${currentShader.selectedGroup.join(',')})(${currentShader.selectedThread.join(',')})`
-				} else {
-					threadStatusItem.text = `$(pulse) (${currentShader.selectedThread.join(',')})`
-				}
-				threadStatusItem.tooltip = 'Select different shader thread for ' + currentShader.name
-				threadStatusItem.show()
-			} else {
-				threadStatusItem.hide()
-			}
-		}))
-	}
+
 
 	// Automatically connect if running inside deshader-integrated vscode
 	if (typeof deshader !== 'undefined') {
@@ -650,4 +612,17 @@ async function getDeviceInfo() {
 async function callOrAwait<T, U extends unknown[]>(f: () => T | Promise<T>, ...a: U): Promise<T> {
 	const r = f()
 	return r instanceof Promise ? r.then(r => r) : r
+}
+
+function messageWithTimeout(title: string) {
+	vscode.window.withProgress(
+		{
+			location: vscode.ProgressLocation.Notification,
+			title,
+			cancellable: true,
+		},
+		async (progress) => {
+			setTimeout(() => progress.report({ increment: 100 }), 2000)
+		}
+	)
 }

@@ -51,9 +51,10 @@ type ErrorFunction = (e: unknown) => void
  * Deshader virtual filesystem provider (scheme: 'deshader[ws]')
  */
 export class DeshaderFilesystem implements vscode.FileSystemProvider {
-	root = new Directory('');
-	output: vscode.OutputChannel
 	comm: Communicator
+	output: vscode.OutputChannel
+	root = new Directory('');
+	savePysically = false;
 
 	private vscodeVirtual: {
 		[key: string]: string | undefined
@@ -82,6 +83,10 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 				recommendations: ["osdvf.deshader", "filippofracascia.glsl-language-support"]
 			})
 		}
+	}
+
+	beginSavePhysically() {
+		this.savePysically = true;
 	}
 
 	private showingError = false
@@ -142,6 +147,10 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 					throw e
 				}
 		}
+	}
+
+	endSavePhysically() {
+		this.savePysically = false;
 	}
 
 	async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
@@ -281,7 +290,7 @@ export class DeshaderFilesystem implements vscode.FileSystemProvider {
 		}
 
 		try {
-			await this.comm.save({
+			await (this.savePysically ? this.comm.savePhysical : this.comm.save)({
 				path: uri.path,
 				compile: true,
 				link: true

@@ -248,8 +248,26 @@
         "icon": "$(file-directory)"
       },
       {
-        "command": "deshader.pauseMode",
-        "title": "Select thread pause mode",
+        "command": "deshader.saveMode",
+        "title": "Change source code saving mode",
+        "category": "Deshader",
+        "icon": "$(save)"
+      },
+      {
+        "command": "deshader.savePhysically",
+        "title": "Save source code physically",
+        "category": "Deshader",
+        "icon": "$(save)"
+      },
+      {
+        "command": "deshader.savePhysicallyAll",
+        "title": "Save all source codes physically",
+        "category": "Deshader",
+        "icon": "$(save-all)"
+      },
+      {
+        "command": "deshader.threadMode",
+        "title": "Select multithreaded debugging mode",
         "category": "Deshader",
         "icon": "$(debug-coverage)"
       },
@@ -284,6 +302,13 @@
           "command": "deshader.showInstrumented",
           "group": "navigation",
           "when": "resourceLangId == glsl && debugType == deshader && resourceExtname != .instrumented"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "deshader.savePhysically",
+          "group": "navigation",
+          "when": "deshader.connected" 
         }
       ],
       "editor/context": [
@@ -383,12 +408,14 @@
         "deshader.path": {
           "type": "string",
           "markdownDescription": "Path to the Deshader Library (system directories will be searched if empty; no effect in Deshader Editor). [Download Deshader Library](command:deshader.download)",
-          "default": ""
+          "default": "",
+          "scope": "machine-overridable"
         },
         "deshader.launcher": {
           "type": "string",
           "description": "Path to the Deshader Launcher (system directories will be searched if empty; no effect in Deshader Editor)",
-          "default": ""
+          "default": "",
+          "scope": "machine-overridable"
         },
         "deshader.openAfterConnect": {
           "type": "boolean",
@@ -399,6 +426,19 @@
           "type": "string",
           "markdownDescription": "Default console host for applications launched in `externalTerminal` mode",
           "default": "xterm"
+        },
+        "deshader.saveMode": {
+          "type": "string",
+          "description": "Select whether the source codes from the virtual workspace should be saved to the physical storage",
+          "enum": [
+            "virtual",
+            "physical"
+          ],
+          "enumDescriptions": [
+            "Save shaders only to the virtual workspace",
+            "Always save shaders physically"
+          ],
+          "default": "virtual"
         },
         "deshader.targetAliveCheck": {
           "type": "number",
@@ -439,6 +479,21 @@
           "type": "boolean",
           "description": "Revert instrumented code and stop debugging when disconnecting from the target",
           "default": true
+        },
+        "deshader.debugging.threadMode": {
+          "type": "string",
+          "enum": [
+            "single",
+            "all"
+          ],
+          "enumDescriptions": [
+            "The pivot thread will be the only thread that reports debugging data.",
+            "All threads will report debugging data simultaneously. Pivot will only be used to select the thread in the UI."
+          ],
+          "default": "single",
+          "description": "Select the multithreaded debugging mode",
+          "scope": "window",
+          "ignoreSync" : true
         }
       }
     },

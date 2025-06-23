@@ -58,12 +58,11 @@ export class DebugSession extends DebugSessionBase {
 
     public shaders: RunningShader[] = [];
     /**
-     * `RunningShader.id`. Relies on the mechanism that `extension.ts` dispatches `updateStackItem` in `vscode.debug.onDidChangeActiveStackItem` event.
+     * `RunningShader.id`. Relies on the mechanism that `extension.ts` dispatches `updateStackItem` every time a `vscode.debug.onDidChangeActiveStackItem` event occurs.
      */
     public currentShader = 0;
     public paused = false;
     public outputChannel: vscode.OutputChannel | null = null;
-    public singlePauseMode = false;
 
     /**
      * Resolves when the connection is established after the launch or attach request
@@ -126,19 +125,22 @@ export class DebugSession extends DebugSessionBase {
     }
 
     public setupEvents() {
-        // setup event handlers
+        // setup event handlers from Deshader Communicator
         this._comm.onJson<'stop'>(Events.stop, params => {
             this.paused = true
+            this.currentShader = params.shader
             if (params.step == 0) {
-                this.sendEvent(new StoppedEvent('entry', params.thread))
-            } else { this.sendEvent(new StoppedEvent('step', params.thread)) }
+                this.sendEvent(new StoppedEvent('entry', params.shader))
+            } else { this.sendEvent(new StoppedEvent('step', params.shader)) }
         })
         this._comm.onJson<'stopOnBreakpoint'>(Events.stopOnBreakpoint, (params) => {
             this.paused = true
-            this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.thread, hitBreakpointIds: params.ids })))
+            this.currentShader = params.shader
+            this.sendEvent(new Event('stopped', <DebugProtocol.StoppedEvent['body']>({ reason: 'breakpoint', threadId: params.shader, hitBreakpointIds: params.ids })))
         })
         this._comm.onJson<'stopOnDataBreakpoint'>(Events.stopOnDataBreakpoint, (threadID) => {
             this.paused = true
+            this.currentShader = threadID
             this.sendEvent(new StoppedEvent('data breakpoint', threadID))
         })
         this._comm.onJson<'breakpoint'>(Events.breakpoint, (event: DeshaderBreakpointEvent) => {
@@ -281,8 +283,8 @@ export class DebugSession extends DebugSessionBase {
                     response.body = this.shaders.find(s => s.id == this.currentShader)
                 }
                 break
-            case 'getPauseMode':
-                response.body = this.singlePauseMode
+            case 'isPaused':
+                response.body = this.paused
                 break
             case 'updateStackItem'://set the shader for which the RunningShader info is returned in getCurrentShader
                 const item = <vscode.DebugStackFrame | vscode.DebugThread>args
@@ -292,10 +294,6 @@ export class DebugSession extends DebugSessionBase {
                 const shader = this.shaders.find(s => s.id == this.currentShader)
                 if (shader)
                     await this._comm.selectThread({ shader: shader.id, thread: args.thread, group: args.group, seq: response.request_seq })
-                break
-            case 'pauseMode':
-                await this._comm.pauseMode({ seq: response.request_seq, single: args.single })// TODO detect errors
-                this.singlePauseMode = args.single
                 break
             default: this.sendErrorResponse(response, 1014, 'unrecognized request', null, ErrorDestination.Telemetry)
         }
@@ -347,10 +345,9 @@ export class DebugSession extends DebugSessionBase {
 
     protected async initialState() {
         const state = await this._comm.state()
-        this.singlePauseMode = state.singlePauseMode
         this.processPushedBreakpoints(state.breakpoints)
         if (state.paused) {
-            this.sendEvent(new StoppedEvent('entry', state.runningShaders.find(_ => true)?.id))
+            this._comm.resendEvent()
         }
     }
 
@@ -372,7 +369,7 @@ export class DebugSession extends DebugSessionBase {
         response.body.supportsEvaluateForHovers = true
 
         // make VS Code show a 'step back' button
-        response.body.supportsStepBack = false
+        response.body.supportsStepBack = true
 
         // make VS Code support data breakpoints
         response.body.supportsDataBreakpoints = true
@@ -406,14 +403,14 @@ export class DebugSession extends DebugSessionBase {
         response.body.supportsSteppingGranularity = true
         response.body.supportsInstructionBreakpoints = false
 
-        // make VS Code able to read and write variable memory
+        // TODO expose OpenGL object via Hybdrid Storage
         response.body.supportsReadMemoryRequest = true
         response.body.supportsWriteMemoryRequest = true
 
         response.body.supportSuspendDebuggee = false
         response.body.supportTerminateDebuggee = true
-        response.body.supportsRestartRequest = true // graphics API cannot be 'restarted'. TODO would be restarting the application useful?
-        response.body.supportsRestartFrame = false
+        response.body.supportsRestartRequest = true // really means re-instrumentation of the current shader
+        response.body.supportsRestartFrame = true
         response.body.supportsFunctionBreakpoints = true
         response.body.supportsDelayedStackTraceLoading = true
         // A DAP "thread" is effectively mapped to a shader stage. VSCode's thread selection mechanism is used to control the selected stage.
@@ -801,6 +798,18 @@ export class DebugSession extends DebugSessionBase {
         }
     }
 
+    protected async stepBackRequest(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments): Promise<void> {
+        try {
+            await this.connected
+
+            await this._comm.stepBack({ ...args, seq: response.request_seq })
+            this.paused = false
+            this.sendResponse(response)
+        } catch (e) {
+            this.commError(response, e)
+        }
+    }
+
     protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): Promise<void> {
         try {
             await this.connected
@@ -864,6 +873,9 @@ export class DebugSession extends DebugSessionBase {
         }
     }
 
+    /**
+     * Shader stages are converted to VSCode threads
+     */
     protected async threadsRequest(response: DebugProtocol.ThreadsResponse): Promise<void> {
         try {
             await this.connected
@@ -951,20 +963,20 @@ export class DebugSession extends DebugSessionBase {
         for (const shader of shaders) {
             let dimensions = ""
             let selectedThread = ""
-            if (shader.groupCount && shader.selectedGroup) {
+            if (shader.groupCount && shader.pivot.group) {
                 dimensions = shader.groupCount[0].toString()
                 for (let i = 1; i < shader.groupCount.length; i++) {
                     dimensions += `,${shader.groupCount[i]}`
-                    selectedThread += `,${shader.selectedGroup[i]}`
+                    selectedThread += `,${shader.pivot.group[i]}`
                 }
                 dimensions += "><"
                 selectedThread += ")("
             }
             dimensions += shader.groupDim[0].toString()
-            selectedThread += shader.selectedThread[0].toString()
+            selectedThread += shader.pivot.thread[0].toString()
             for (let i = 1; i < shader.groupDim.length; i++) {
                 dimensions += `,${shader.groupDim[i]}`
-                selectedThread += `,${shader.selectedThread[i]}`
+                selectedThread += `,${shader.pivot.thread[i]}`
             }
 
             resultThreads.push({

@@ -39,12 +39,13 @@ export type EventArgs = {
         /** Step ID within the source file. Not used by the debug adapter */
         step: number,
         /** Running shader ID */
-        thread: number,
+        shader: number,
     },
     stopOnBreakpoint: {
-        ids: number[],//breakpoint IDs list,
-        // Running shader ID
-        thread: number,
+        /** Breakpoint IDs list */
+        ids: number[],
+        /** Running shader ID */
+        shader: number,
     },
     stopOnDataBreakpoint: number,
     stopOnFunction: String,
@@ -60,20 +61,24 @@ export type RunningShader = {
     name: string,
     groupCount?: number[],
     groupDim: number[],
-    selectedGroup?: number[],//same dimensions as groups
-    selectedThread: number[],//same dimensions as threads
+    pivot: Thread,
     type: string,
+}
+export type Thread = {
+    thread: [number, number, number],
+    group?: [number, number, number],
 }
 export type State = {
     debugging: boolean,
     breakpoints: Breakpoint[],
     runningShaders: RunningShader[],
     paused: boolean,
-    singlePauseMode: boolean,
+    singleThreadMode: boolean,
     lsp?: string,//URL
 }
 export type Settings = {
     logIntoResponses: boolean,
+    savePhysically: boolean,
     singleChunkShader: boolean,
     stackTraces: boolean,
 }
@@ -123,8 +128,10 @@ const ANSI_ESCAPE_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)
 const BINARY_NOTICE = '[binary data]'
 
 /**
- * Communicates through WS or HTTP with a running Deshader instance
- * Proxies both the virtual file system and the debugger
+ * Communicates through WS or HTTP with a running Deshader instance.
+ * Proxies both the virtual file system and the debugger.
+ * 
+ * Automatically applies user settings (`vscode.workspace.onDidChangeConfiguration`).
  */
 export class Communicator extends EventEmitter implements vscode.Disposable {
     output: vscode.OutputChannel
@@ -137,6 +144,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     private _onMessage = new Set<MessageCallback>()
     private _settings: Settings = {
         logIntoResponses: true,
+        savePhysically: true,
         singleChunkShader: true,
         stackTraces: true,
     }
@@ -155,17 +163,21 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         )
     }
 
+    /**
+     * Apply user settings
+     */
     private updateConfig() {
-        const tracing = vscode.workspace.getConfiguration('deshader.tracing')
-        const debugging = vscode.workspace.getConfiguration('deshader.debugging')
-        this.trace = tracing.get<boolean>('enable', false)
-        this._settings.stackTraces = this.trace && tracing.get<boolean>('stacks', false)
-        this._settings.logIntoResponses = this.trace && tracing.get<boolean>('libraryLogs', false)
-        this._settings.singleChunkShader = debugging.get<boolean>('singleChunk', true)
+        const config = vscode.workspace.getConfiguration('deshader.tracing')
+        this.trace = config.get<boolean>('tracing.enable', false)
+        this._settings.stackTraces = this.trace && config.get<boolean>('tracing.stacks', false)
+        this._settings.savePhysically = config.get<boolean>('saveMode', true) 
+        this._settings.logIntoResponses = this.trace && config.get<boolean>('tracing.libraryLogs', false)
+        this._settings.singleChunkShader = config.get<boolean>('debugging.singleChunk', true)
 
         if (this.isConnected) {
             this.settings(this._settings)
         }
+        this.threadMode({ single: config.get<string>('debugging.threadMode', 'single') == 'single' })
     }
 
     /**
@@ -345,7 +357,7 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         await this.sendParametric('saveVirtual', req, content)
     }
     /**
-     * Tries to save physically, if it fails, it saves virtually
+     * If settings.savePhysically is true, tries to save physically, if it fails, it saves virtually
      */
     async save(req: SaveRequest, content: Body): Promise<void> {
         await this.sendParametric('save', req, content, false)
@@ -398,6 +410,11 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
         await this.sendParametric('terminate', req)
     }
 
+    /** Resend the last event the backend was paused on */
+    async resendEvent(): Promise<void> {
+        await this.sendParametric('resendEvent', {})
+    }
+
     // get current debugger state (because the session could be started from other client than this vscode instance)
     async state(req?: Seq): Promise<State> {
         return this.sendParametricJson<State>('state', req ?? {})
@@ -415,8 +432,8 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     async pause(req: DebugProtocol.PauseArguments & Seq): Promise<void> {
         await this.sendParametric('pause', req)
     }
-    async pauseMode(args: { single: boolean } & Seq): Promise<void> {
-        await this.sendParametric('pauseMode', args)
+    async threadMode(args: { single: boolean } & Seq): Promise<void> {
+        await this.sendParametric('threadMode', args)
     }
     possibleBreakpoints(args: BreakpointLocation & Seq): Promise<PossibleBreakpoints> {
         return this.sendParametricJson<PossibleBreakpoints>('possibleBreakpoints', args)
@@ -453,6 +470,9 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     }
     async next(req: DebugProtocol.NextArguments & Seq): Promise<void> {
         await this.sendParametric('next', req)
+    }
+    async stepBack(args: DebugProtocol.StepBackArguments & Seq) : Promise<void> {
+        await this.sendParametricJson('stepBack', args)
     }
     async stepIn(args: DebugProtocol.StepInArguments & Seq): Promise<void> {
         await this.sendParametric('stepIn', args)
