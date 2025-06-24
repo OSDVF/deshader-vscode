@@ -680,7 +680,7 @@ export class DebugSession extends DebugSessionBase {
         try {
             await this.connected
 
-            response.body = { scopes: await this._comm.scopes({ ...args, seq: response.request_seq }) }
+            response.body = { scopes: await this._comm.scopes({ ...args, seq: response.request_seq, shader: this.currentShader }) }
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)
@@ -899,7 +899,7 @@ export class DebugSession extends DebugSessionBase {
         try {
             await this.connected
 
-            response.body = { variables: await this._comm.variables({ ...args, seq: response.request_seq }) }
+            response.body = { variables: await this._comm.variables({ ...args, shader: this.currentShader, seq: response.request_seq }) }
             this.sendResponse(response)
         } catch (e) {
             this.commError(response, e)

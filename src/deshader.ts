@@ -115,6 +115,8 @@ export type StackTraceResponse = {
 }
 export type WithLength<T> = T & { length?: number }
 export type Seq = { seq?: number }
+/** Some request require a running shader locator */
+export type ShaderReq = {shader: number} & Seq
 export type PathRequest = { path: string } & Seq
 export type ListRequest = { path?: string, recursive?: boolean, untagged?: boolean } & Seq
 export type Body = string | ArrayBufferLike | Blob | ArrayBufferView
@@ -453,13 +455,13 @@ export class Communicator extends EventEmitter implements vscode.Disposable {
     async restart(args: DebugProtocol.RestartArguments & Seq): Promise<void> {
         await this.sendParametric('restart', args)
     }
-    variables(args: DebugProtocol.VariablesArguments & Seq): Promise<DebugProtocol.Variable[]> {
+    variables(args: DebugProtocol.VariablesArguments & ShaderReq): Promise<DebugProtocol.Variable[]> {
         return this.sendParametricJson<DebugProtocol.Variable[]>('variables', args)
     }
     setVariable(args: DebugProtocol.SetVariableArguments & Seq): Promise<WithLength<DebugProtocol.SetVariableResponse['body']>> {
         return this.sendParametricJson<WithLength<DebugProtocol.SetVariableResponse['body']>>('setVariable', args)
     }
-    scopes(args: DebugProtocol.ScopesArguments & Seq): Promise<DebugProtocol.Scope[]> {
+    scopes(args: DebugProtocol.ScopesArguments & ShaderReq): Promise<DebugProtocol.Scope[]> {
         return this.sendParametricJson<DebugProtocol.Scope[]>('scopes', args)
     }
     async continue(req?: DebugProtocol.ContinueArguments & Seq): Promise<void> {
