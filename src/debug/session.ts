@@ -5,7 +5,8 @@ import {
     Event,
     StoppedEvent, InitializedEvent, TerminatedEvent, BreakpointEvent, OutputEvent,
     ProgressStartEvent, ProgressUpdateEvent, ProgressEndEvent, InvalidatedEvent,
-    Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination
+    Thread, StackFrame, Scope, Source, MemoryEvent, Logger, ErrorDestination,
+    ThreadEvent
 } from '@vscode/debugadapter'
 import { Communicator, Events, EventArgs, RunningShader, LaunchArguments, AttachArguments, Breakpoint, BreakpointEvent as DeshaderBreakpointEvent, DeshaderScheme, toRawURL, DeshaderOrRawScheme } from '../deshader'
 import * as vscode from 'vscode'
@@ -346,8 +347,11 @@ export class DebugSession extends DebugSessionBase {
     protected async initialState() {
         const state = await this._comm.state()
         this.processPushedBreakpoints(state.breakpoints)
+        for(const shader of state.runningShaders) {
+            this.sendEvent(new ThreadEvent('started', shader.id))
+        }
         if (state.paused) {
-            this._comm.resendEvent()
+            this._comm.resendEvent() // Send again "stop" event if any, so the UI will update the stopped state
         }
     }
 

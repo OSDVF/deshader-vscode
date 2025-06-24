@@ -357,20 +357,30 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		}),
 		vscode.commands.registerCommand(Commands.savePhysically, async () => {
-			if(!vscode.window.activeTextEditor) vscode.window.showErrorMessage("No active text editor");
+			if (!vscode.window.activeTextEditor) vscode.window.showErrorMessage("No active text editor")
 
-			fs.beginSavePhysically();
-			await vscode.workspace.save(vscode.window.activeTextEditor!.document.uri);
-			fs.endSavePhysically();
+			fs.beginSavePhysically()
+			await vscode.workspace.save(vscode.window.activeTextEditor!.document.uri)
+			fs.endSavePhysically()
 		}),
 		vscode.commands.registerCommand(Commands.savePhysicallyAll, async () => {
-			fs.beginSavePhysically();
-			await vscode.workspace.saveAll(false);// TODO only save shaders and not other files
-			fs.endSavePhysically();
+			fs.beginSavePhysically()
+			await vscode.workspace.saveAll(false)// TODO only save shaders and not other files
+			fs.endSavePhysically()
 		}),
 		vscode.commands.registerCommand(Commands.saveMode, async (arg?: string) => {
-			const result = arg || await vscode.window.showQuickPick(['Physically', 'Virtually'], {canPickMany: false, placeHolder: 'Select save mode'});
-			if(result) await vscode.workspace.getConfiguration('deshader').update('saveMode', result.toLowerCase());  
+			const config = vscode.workspace.getConfiguration('deshader')
+			const current = config.get<string>('saveMode')
+			const result = arg || (await vscode.window.showQuickPick([
+				{
+					label: 'Physically',
+					picked: current === 'physical',
+				}, {
+					label: 'Virtually',
+					picked: current === 'virtual',
+				}
+			], { canPickMany: false, placeHolder: 'Select save mode' }))?.label
+			if (result) await vscode.workspace.getConfiguration('deshader').update('saveMode', result.toLowerCase())
 		}),
 		vscode.commands.registerCommand(Commands.selectThread, async () => {
 			const sess = vscode.debug.activeDebugSession
